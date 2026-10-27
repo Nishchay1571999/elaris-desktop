@@ -1,0 +1,18 @@
+[package]
+name = "workspace"
+version = "0.1.0"
+description = "Workspace access for Elaris: file tree, git status and diffs, change watching"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+git2.workspace = true
+ignore.workspace = true
+notify-debouncer-full.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+ts-rs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

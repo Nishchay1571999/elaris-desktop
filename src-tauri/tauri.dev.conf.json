@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "ai.elaris.desktop.dev",
+  "app": {
+    "windows": [
+      {
+        "title": "Elaris (dev)",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 960,
+        "minHeight": 600,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 14,
+          "y": 20
+        },
+        "backgroundColor": "#1b1c1f"
+      }
+    ]
+  }
+}

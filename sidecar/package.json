@@ -1,0 +1,20 @@
+{
+  "name": "@elaris/agent-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Runs the Claude Agent SDK for Elaris Desktop; spoken to over stdio JSON lines by the Rust host",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.310",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^5.9.3"
+  },
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit"
+  }
+}

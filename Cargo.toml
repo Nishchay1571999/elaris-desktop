@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "src-tauri"]
+
+[workspace.package]
+edition = "2024"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+agent-protocol = { path = "crates/agent-protocol" }
+agent-core = { path = "crates/agent-core" }
+code-intelligence = { path = "crates/code-intelligence" }
+customizations = { path = "crates/customizations" }
+terminal = { path = "crates/terminal" }
+workspace = { path = "crates/workspace" }
+
+git2 = "0.20"
+ignore = "0.4"
+notify-debouncer-full = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tokio-util = "0.7"
+ts-rs = "12"
+uuid = { version = "1", features = ["v4"] }

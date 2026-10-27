@@ -1,0 +1,19 @@
+[package]
+name = "customizations"
+version = "0.1.0"
+description = "Skills, MCP servers, tool permissions and CLAUDE.md instructions for Elaris: what is installed, the skills.sh registry, and installing, editing or removing them"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "query"] }
+serde.workspace = true
+# Keeps the key order of ~/.claude.json and settings.json when they are changed.
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror.workspace = true
+tokio.workspace = true
+ts-rs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

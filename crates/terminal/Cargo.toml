@@ -1,0 +1,15 @@
+[package]
+name = "terminal"
+version = "0.1.0"
+description = "Pseudo-terminals for Elaris: spawns the user's shell and streams its output"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+portable-pty = "0.9"
+strip-ansi-escapes = "0.2"
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

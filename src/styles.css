@@ -1,0 +1,518 @@
+@import "tailwindcss";
+
+/* Dark is the default (`class="dark"` on <html>); light tokens are kept for later. */
+@custom-variant dark (&:is(.dark *));
+
+/* Desktop only: icons and Powerline glyphs for the terminal (Nerd Fonts, MIT; see assets/fonts). */
+@font-face {
+  font-family: "Symbols Nerd Font Mono";
+  src: url("./assets/fonts/SymbolsNerdFontMono-Regular.ttf") format("truetype");
+  font-display: block;
+}
+
+/*
+ * Elaris design tokens.
+ *
+ * Raw values live on :root / .dark. Components only ever reference the
+ * semantic Tailwind names exposed through @theme below (bg-surface,
+ * text-muted-foreground, border-border, bg-brand, ...). See
+ * docs/design-system.md for what each token is for. Copied from apps/web
+ * until a shared package exists; desktop-only tokens are marked.
+ *
+ * Neutrals carry a faint cool hue (~265) so they sit comfortably next to the
+ * blue of the Elaris mark; the brand blue is sampled from logo.png.
+ */
+:root {
+  --radius: 0.625rem;
+
+  /* Surfaces */
+  --background: oklch(0.975 0.003 265); /* app canvas */
+  --surface: oklch(0.995 0.001 265); /* conversation pane */
+  --surface-elevated: oklch(1 0 0); /* composer, popovers */
+  --surface-sunken: oklch(0.965 0.004 265); /* code blocks, user bubbles */
+
+  /* Text */
+  --foreground: oklch(0.21 0.012 265);
+  --muted-foreground: oklch(0.5 0.012 265);
+  --subtle-foreground: oklch(0.62 0.01 265);
+
+  /* Brand */
+  --brand: oklch(0.53 0.2 264);
+  --brand-foreground: oklch(0.99 0 0);
+  --brand-soft: oklch(0.53 0.2 264 / 9%);
+
+  /* Lines and interaction */
+  --border: oklch(0.21 0.02 265 / 9%);
+  --border-strong: oklch(0.21 0.02 265 / 15%);
+  --input: oklch(0.21 0.02 265 / 14%);
+  --ring: oklch(0.53 0.2 264 / 55%);
+
+  /* shadcn semantic slots, mapped onto Elaris tokens */
+  --card: var(--surface-elevated);
+  --card-foreground: var(--foreground);
+  --popover: var(--surface-elevated);
+  --popover-foreground: var(--foreground);
+  --primary: var(--brand);
+  --primary-foreground: var(--brand-foreground);
+  --secondary: oklch(0.94 0.005 265);
+  --secondary-foreground: var(--foreground);
+  --muted: oklch(0.945 0.005 265); /* hover fill */
+  --accent: oklch(0.935 0.006 265); /* hover / focused menu item */
+  --accent-foreground: var(--foreground);
+  --destructive: oklch(0.56 0.21 25);
+
+  --sidebar: oklch(0.96 0.004 265);
+  --sidebar-foreground: var(--foreground);
+  --sidebar-primary: var(--brand);
+  --sidebar-primary-foreground: var(--brand-foreground);
+  --sidebar-accent: oklch(0.21 0.02 265 / 6%); /* hover */
+  --sidebar-accent-foreground: var(--foreground);
+  --sidebar-selected: oklch(0.21 0.02 265 / 8.5%);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--ring);
+
+  /*
+   * Syntax highlighting, ink-first: names (variables, parameters) stay in the
+   * text colour; colour marks structure (keywords, functions, types) and
+   * literals. Five hues, no violet. Applied by the tok-* classes below.
+   */
+  --code-keyword: oklch(0.5 0.14 255); /* the brand's blue, muted */
+  --code-function: oklch(0.5 0.1 70); /* ochre */
+  --code-type: oklch(0.5 0.09 195); /* teal */
+  --code-string: oklch(0.5 0.12 150); /* sage */
+  --code-number: oklch(0.55 0.14 50); /* amber: numbers, constants, escapes */
+  --code-comment: oklch(0.56 0.01 265);
+  --code-property: oklch(0.43 0.04 250);
+  --code-punct: oklch(0.55 0.01 265);
+
+  /* Desktop: git change colours and diff backgrounds */
+  --git-added: oklch(0.55 0.14 150);
+  --git-modified: oklch(0.6 0.13 75);
+  --git-deleted: oklch(0.56 0.19 25);
+  --diff-add-bg: oklch(0.55 0.14 150 / 12%);
+  --diff-del-bg: oklch(0.56 0.19 25 / 11%);
+
+  --composer-shadow: 0 1px 2px oklch(0.2 0.02 265 / 4%), 0 6px 24px -8px oklch(0.2 0.02 265 / 10%);
+}
+
+.dark {
+  --background: oklch(0.175 0.005 265);
+  --surface: oklch(0.19 0.005 265);
+  --surface-elevated: oklch(0.235 0.006 265);
+  --surface-sunken: oklch(0.155 0.005 265);
+
+  --foreground: oklch(0.93 0.008 85); /* warm off-white */
+  --muted-foreground: oklch(0.7 0.008 265);
+  --subtle-foreground: oklch(0.56 0.008 265);
+
+  --brand: oklch(0.68 0.15 262);
+  --brand-foreground: oklch(0.16 0.02 265);
+  --brand-soft: oklch(0.68 0.15 262 / 14%);
+
+  --border: oklch(1 0 0 / 7.5%);
+  --border-strong: oklch(1 0 0 / 13%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.68 0.15 262 / 60%);
+
+  --secondary: oklch(0.26 0.006 265);
+  --muted: oklch(0.255 0.006 265);
+  --accent: oklch(0.27 0.007 265);
+  --destructive: oklch(0.69 0.17 22);
+
+  --sidebar: oklch(0.205 0.006 265);
+  --sidebar-accent: oklch(1 0 0 / 5%);
+  --sidebar-selected: oklch(1 0 0 / 8%);
+
+  --code-keyword: oklch(0.75 0.1 252);
+  --code-function: oklch(0.87 0.085 92);
+  --code-type: oklch(0.82 0.08 188);
+  --code-string: oklch(0.8 0.1 148);
+  --code-number: oklch(0.8 0.12 62);
+  --code-comment: oklch(0.62 0.012 265);
+  --code-property: oklch(0.83 0.025 245);
+  --code-punct: oklch(0.66 0.01 265);
+
+  --git-added: oklch(0.76 0.14 150);
+  --git-modified: oklch(0.8 0.13 80);
+  --git-deleted: oklch(0.72 0.16 25);
+  --diff-add-bg: oklch(0.76 0.14 150 / 11%);
+  --diff-del-bg: oklch(0.72 0.16 25 / 11%);
+
+  --composer-shadow: 0 1px 2px oklch(0 0 0 / 30%), 0 8px 28px -10px oklch(0 0 0 / 50%);
+}
+
+@theme inline {
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, "SF Mono", Menlo, monospace;
+  --font-heading: var(--font-sans);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-subtle-foreground: var(--subtle-foreground);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-brand-soft: var(--brand-soft);
+  --color-border-strong: var(--border-strong);
+  --color-git-added: var(--git-added);
+  --color-git-modified: var(--git-modified);
+  --color-git-deleted: var(--git-deleted);
+  --color-diff-add: var(--diff-add-bg);
+  --color-diff-del: var(--diff-del-bg);
+
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-selected: var(--sidebar-selected);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+
+  --shadow-composer: var(--composer-shadow);
+
+  --animate-message-in: message-in 180ms cubic-bezier(0.2, 0, 0, 1);
+  --animate-caret: caret 1s steps(2, start) infinite;
+  --animate-dock-in: dock-in 220ms cubic-bezier(0.2, 0, 0, 1);
+
+  @keyframes message-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+  }
+
+  @keyframes dock-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+  }
+
+  @keyframes caret {
+    to {
+      visibility: hidden;
+    }
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+  }
+  html {
+    @apply font-sans;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    /* A desktop app: no rubber-banding, no accidental text selection in chrome. */
+    overscroll-behavior: none;
+    user-select: none;
+    cursor: default;
+    font-feature-settings: "ss01", "cv11";
+  }
+  ::selection {
+    background: var(--brand-soft);
+  }
+  /* Users can switch off response animation in Settings. */
+  [data-animations="off"] * {
+    animation-duration: 0s !important;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    ::before,
+    ::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Rendered Markdown (assistant responses)                                    */
+/* -------------------------------------------------------------------------- */
+
+@layer components {
+  .prose-elaris {
+    font-size: 0.9375rem;
+    line-height: 1.7;
+    overflow-wrap: anywhere;
+  }
+  .prose-elaris > :first-child {
+    margin-top: 0;
+  }
+  .prose-elaris > :last-child {
+    margin-bottom: 0;
+  }
+  .prose-elaris :where(p, ul, ol, blockquote, table, pre, [data-slot="code-block"]) {
+    margin-block: 0.85em;
+  }
+  .prose-elaris :where(h1, h2, h3, h4) {
+    font-weight: 600;
+    line-height: 1.35;
+    margin-top: 1.5em;
+    margin-bottom: 0.5em;
+    letter-spacing: -0.01em;
+  }
+  .prose-elaris h1 {
+    font-size: 1.3em;
+  }
+  .prose-elaris h2 {
+    font-size: 1.15em;
+  }
+  .prose-elaris :where(h3, h4) {
+    font-size: 1em;
+  }
+  .prose-elaris :where(ul, ol) {
+    padding-left: 1.4em;
+  }
+  .prose-elaris ul {
+    list-style: disc;
+  }
+  .prose-elaris ol {
+    list-style: decimal;
+  }
+  .prose-elaris li + li {
+    margin-top: 0.3em;
+  }
+  .prose-elaris li::marker {
+    color: var(--subtle-foreground);
+  }
+  .prose-elaris strong {
+    font-weight: 600;
+  }
+  .prose-elaris a {
+    color: var(--brand);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: color-mix(in oklch, var(--brand) 40%, transparent);
+  }
+  .prose-elaris blockquote {
+    border-left: 2px solid var(--border-strong);
+    padding-left: 1em;
+    color: var(--muted-foreground);
+  }
+  .prose-elaris hr {
+    border-color: var(--border);
+    margin-block: 1.5em;
+  }
+  .prose-elaris :not(pre) > code {
+    font-family: var(--font-mono);
+    font-size: 0.86em;
+    padding: 0.12em 0.36em;
+    border-radius: 0.3rem;
+    background: var(--surface-sunken);
+    border: 1px solid var(--border);
+  }
+  .prose-elaris table {
+    display: block;
+    overflow-x: auto;
+    border-collapse: collapse;
+    font-size: 0.9em;
+  }
+  .prose-elaris :where(th, td) {
+    border-bottom: 1px solid var(--border);
+    padding: 0.45em 0.9em 0.45em 0;
+    text-align: left;
+  }
+  .prose-elaris th {
+    font-weight: 600;
+  }
+
+  /* highlight.js token colours (emitted by rehype-highlight) */
+  .hljs-keyword,
+  .hljs-selector-tag,
+  .hljs-meta .hljs-keyword {
+    color: var(--code-keyword);
+  }
+  .hljs-string,
+  .hljs-regexp,
+  .hljs-attr,
+  .hljs-symbol {
+    color: var(--code-string);
+  }
+  .hljs-number,
+  .hljs-literal {
+    color: var(--code-number);
+  }
+  .hljs-title,
+  .hljs-title.function_,
+  .hljs-section {
+    color: var(--code-function);
+  }
+  .hljs-type,
+  .hljs-built_in,
+  .hljs-title.class_ {
+    color: var(--code-type);
+  }
+  .hljs-attribute,
+  .hljs-property {
+    color: var(--code-property);
+  }
+  .hljs-comment,
+  .hljs-quote,
+  .hljs-meta {
+    color: var(--code-comment);
+    font-style: italic;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Code views: scopes from highlight.js and language servers (lib/syntax.ts)  */
+/* -------------------------------------------------------------------------- */
+
+@layer components {
+  .tok-keyword {
+    color: var(--code-keyword);
+  }
+  /* Macros, decorators and attributes: code that writes code. */
+  .tok-macro {
+    color: var(--code-keyword);
+    font-style: italic;
+  }
+  .tok-function {
+    color: var(--code-function);
+  }
+  .tok-type {
+    color: var(--code-type);
+  }
+  .tok-namespace {
+    color: var(--muted-foreground);
+  }
+  .tok-string {
+    color: var(--code-string);
+  }
+  .tok-number,
+  .tok-constant,
+  .tok-escape {
+    color: var(--code-number);
+  }
+  .tok-label {
+    color: var(--code-number);
+    font-style: italic;
+  }
+  .tok-comment {
+    color: var(--code-comment);
+    font-style: italic;
+  }
+  .tok-property {
+    color: var(--code-property);
+  }
+  /* Parameters keep the ink and lean, so they read apart from locals. */
+  .tok-parameter {
+    font-style: italic;
+  }
+  .tok-operator,
+  .tok-punct {
+    color: var(--code-punct);
+  }
+  /* Modifiers from the language server. */
+  .tok-mut {
+    text-decoration: underline;
+    text-decoration-color: color-mix(in oklch, currentColor 40%, transparent);
+    text-underline-offset: 3px;
+  }
+  .tok-deprecated {
+    text-decoration: line-through;
+  }
+  .tok-unsafe {
+    text-decoration: underline wavy;
+    text-decoration-color: color-mix(in oklch, var(--destructive) 60%, transparent);
+    text-underline-offset: 3px;
+  }
+}
+
+/* Blinking caret at the end of a streaming reply. */
+@layer components {
+  .streaming-caret .prose-elaris > :last-child:not(ul, ol, blockquote)::after,
+  .streaming-caret .prose-elaris > :is(ul, ol):last-child > li:last-child::after,
+  .streaming-caret .prose-elaris > blockquote:last-child > :last-child::after {
+    content: "";
+    display: inline-block;
+    width: 0.45em;
+    height: 1.05em;
+    margin-left: 0.15em;
+    vertical-align: text-bottom;
+    border-radius: 1px;
+    background: var(--brand);
+    animation: var(--animate-caret);
+  }
+  .streaming-caret .prose-elaris > [data-slot="code-block"]:last-child::after,
+  [data-animations="off"] .streaming-caret .prose-elaris *::after {
+    display: none !important;
+  }
+}
+
+/* Desktop: selectable content areas opt back in. */
+@layer base {
+  .selectable,
+  .prose-elaris,
+  textarea,
+  input {
+    user-select: text;
+    cursor: auto;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* Scrolls without showing a scrollbar, inner code blocks included. */
+@utility scrollbar-hidden {
+  scrollbar-width: none;
+  & * {
+    scrollbar-width: none;
+  }
+  &::-webkit-scrollbar,
+  & *::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+}

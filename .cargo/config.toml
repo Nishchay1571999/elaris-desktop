@@ -1,0 +1,4 @@
+# ts-rs writes TypeScript mirrors of the Rust IPC types here when
+# `cargo test` runs (see crates/*/src with `#[ts(export)]`).
+[env]
+TS_RS_EXPORT_DIR = { value = "src/bindings", relative = true }

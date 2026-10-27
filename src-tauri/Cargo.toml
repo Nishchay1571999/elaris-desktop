@@ -1,0 +1,38 @@
+[package]
+name = "elaris-desktop"
+version = "0.1.0"
+description = "Elaris Desktop"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "elaris_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+agent-core.workspace = true
+agent-protocol.workspace = true
+code-intelligence.workspace = true
+customizations.workspace = true
+terminal.workspace = true
+workspace.workspace = true
+
+base64 = "0.22"
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder"] }
