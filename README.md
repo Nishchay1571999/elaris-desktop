@@ -7,7 +7,7 @@ You open a folder, describe what you want, and the agent reads, edits and runs t
 - [Getting started](#getting-started)
 - [What it does](#what-it-does)
   - [Layout](#layout) · [Chats](#chats) · [The agent](#the-agent) · [Composer](#composer) · [Transcript](#transcript) · [Approvals and questions](#approvals-and-questions) · [Subagents](#subagents)
-  - [Saved contexts](#saved-contexts) · [Terminals](#terminals) · [Git and changes](#git-and-changes) · [GitHub](#github)
+  - [Saved contexts](#saved-contexts) · [Terminals](#terminals) · [Source Control](#source-control) · [GitHub](#github)
   - [Desktop control](#desktop-control) · [Emulators and simulators](#emulators-and-simulators) · [Code highlighting](#code-highlighting)
   - [Customizations](#customizations) · [Settings](#settings) · [Command palette and shortcuts](#command-palette-and-shortcuts) · [Project logos](#project-logos)
 - [How it works](#how-it-works)
@@ -50,12 +50,13 @@ pnpm desktop:dev
 - **Three resizable panes.**
   - On the left, the sidebar: 280 px by default, collapsible.
   - In the middle, the main pane: a chat, a diff, a PR or issue, a customization page or settings.
-  - On the right, the **Changes** panel: 320 px by default, collapsible.
+  - On the right, the **Source Control** panel: 320 px by default, collapsible.
 - **Title bar.** It uses the native macOS overlay title bar and has buttons for:
   - showing and hiding the sidebar;
   - Back and Forward (up to 50 steps of history);
-  - showing and hiding the Changes panel;
-  - a workspace button with the project's logo, folder name and git branch. It opens the list of recent folders, *Open folder…* and *Change logo…*.
+  - showing and hiding the Source Control panel;
+  - a workspace button with the project's logo, folder name and git branch. It opens the list of recent folders, *Open folder…* and *Change logo…*;
+  - beside it, the branch's standing against its remote (`2↓ 1↑`). Click it to sync, or to publish a branch that has no upstream.
 - **Tabs above the chat.** Each chat has a tab strip:
   - the conversation itself;
   - tabs for files the agent wrote or edited;
@@ -188,16 +189,48 @@ You can save any chat as a context, so another chat can use it later.
 - **Persistence.** Shells and their scrollback (1 MB per terminal) survive switching tabs and chats.
 - **Agent terminals.** Terminals the agent opens with `terminal-access` are tinted, pulse while they're running, and stay open after their command ends. They reopen as tabs after a window reload. The agent can only use terminals that its own chat opened.
 
-### Git and changes
+### Source Control
 
-The right panel lists the folder's git changes: added, modified, deleted, renamed, untracked and conflicted files. It refreshes whenever files change on disk.
+The right panel works like VS Code's Source Control view. It refreshes whenever files or git state change on disk.
 
-- **Diffs.** Click a file to see its changes against HEAD, with syntax colouring.
+- **Changes.**
+  - Files are grouped into *Merge Changes*, *Staged Changes*, *Changes* and *Untracked Changes*.
+  - Each file has a letter badge: A, M, D, R, U, or `!` for a conflict.
+  - View the files as a list or a folder tree (single-folder chains fold into one row), sorted by name, path or status.
+  - Hover a file, folder or group to stage, unstage or discard it. Right-click a file for *Open Changes*, *Open File*, *Add to .gitignore*, *Reveal in Finder* and *Copy Path*.
+  - ⌘-click and ⇧-click select several files. Space stages the focused file.
+  - Discarding asks first. Untracked files go to the Trash rather than being deleted.
+- **Diffs.**
+  - Clicking a file opens its staged or working-tree diff. A file with both kinds of change gets a switch between them.
+  - Each hunk has *Stage*, *Unstage* or *Revert* buttons, applied with `git apply`.
 - **Committing.**
-  - Write a message, then press ⌘↩ to commit or ⇧⌘↩ to commit and push.
-  - The menu on the commit button also offers *Commit & open pull request…*.
-- **Branches.** You can switch branches, or check out a remote branch as a local tracking branch. If uncommitted changes would block the switch, Elaris stashes them, switches, and puts them back on the new branch.
-- **Under the hood.** Reading status, diffs and branches uses libgit2. Commits, pushes and branch switches run the `git` command.
+  - Write a message and press ⌘↩ to commit, or ⇧⌘↩ to commit and push.
+  - If anything is staged, only the staged files are committed. If nothing is, Elaris asks once whether to stage everything (VS Code's smart commit).
+  - The main button changes with the repository's state: *Commit*; *Continue* or *Abort* during a merge, rebase, cherry-pick or revert; *Publish Branch* when the branch has no upstream; and *Sync Changes 2↓ 1↑* when it's behind or ahead.
+  - The button's menu adds *Commit & Push*, *Commit & Sync*, *Commit & Open Pull Request…*, *Commit All* and *Amend*.
+- **The `…` menu** follows VS Code's:
+  - View & Sort.
+  - Pull, Push, Clone, Checkout to…, Fetch.
+  - Add Co-authors… (adds `Co-authored-by:` trailers).
+  - **Commit:** staged, all, amend, signed off, no-verify, undo last commit.
+  - **Changes:** stage, unstage or discard all.
+  - **Pull, Push:** sync, pull (rebase), pull from…, push to…, force push (`--force-with-lease`), fetch (prune), fetch from all remotes.
+  - **Branch:** merge, rebase, create, create from…, rename, delete, delete remote branch, publish.
+  - **Remote:** add, rename, remove.
+  - **Stash:** stash (with untracked or staged only), apply or pop the latest or a chosen stash, drop, drop all, view.
+  - **Tags:** create (lightweight, or annotated with a message), delete, delete on a remote, push.
+  - Show Commit Graph, and Show Git Output.
+  - Choices and names are asked for in a quick pick, like VS Code's.
+- **Branches.** *Checkout to…* lists local branches, remote branches and tags, plus *Create new branch…*. A remote branch becomes a local tracking branch. If uncommitted changes would block a switch, Elaris stashes them, switches, and puts them back.
+- **Commit Graph.**
+  - Every branch's history (or just the current branch's) with lanes, merge dots, and pills for branches, tags and HEAD.
+  - Click a commit to see its message and changed files. Right-click it to check it out, branch or tag from it, cherry-pick, revert, or copy its hash.
+- **Git Output.** Every git command Elaris runs, with its time, duration, exit code and what git printed, the way VS Code's Git output channel shows it. Error popups link to it.
+- **No repository yet.** The panel offers *Initialize Repository* and *Clone Repository*.
+- **Under the hood.**
+  - Status comes from `git status --porcelain=v2`, and everything that changes the repository runs the `git` command. Hooks, credential helpers and your git config apply as they do in a terminal.
+  - Pulls, pushes, fetches and clones stream git's progress into the panel.
+  - Every command and palette entry is also under *Git:* in the command palette.
 
 ### GitHub
 
@@ -322,8 +355,8 @@ Default shortcuts (Ctrl instead of ⌘ outside macOS). You can change them in Se
 | Settings | ⌘, |
 | Toggle light and dark theme | ⇧⌘L |
 | Toggle sidebar | ⌘B |
-| Toggle files panel | ⌥⌘B |
-| Show changes | ⇧⌘G |
+| Toggle Source Control panel | ⌥⌘B |
+| Show Source Control | ⇧⌘G |
 | Go back / forward | ⌘[ / ⌘] |
 
 *Issues* and *New pull request…* are in the palette without default shortcuts.

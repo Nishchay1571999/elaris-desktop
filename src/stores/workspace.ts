@@ -3,11 +3,13 @@ import { create } from "zustand"
 import type { ChangedFile } from "@/bindings/ChangedFile"
 import type { WorkspaceInfo } from "@/bindings/WorkspaceInfo"
 import { errorMessage, ipc } from "@/lib/ipc"
+import { useScm } from "@/stores/scm"
 import { useUi } from "@/stores/ui"
 
 interface WorkspaceState {
   info: WorkspaceInfo | null
   recent: string[]
+  /** One entry per changed file, staged and unstaged together (from `useScm`). */
   changes: ChangedFile[]
   error: string | null
   /** How far along opening a project is, 0–1, or `null` when not opening one. */
@@ -86,17 +88,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => {
       if (path) await get().open(path)
     },
 
-    refreshChanges: async () => {
-      if (!get().info?.isGit) {
-        set({ changes: [] })
-        return
-      }
-      try {
-        set({ changes: await ipc.git.status() })
-      } catch (error) {
-        set({ error: errorMessage(error) })
-      }
-    },
+    // The Source Control store reads the split status and fills `changes` from it.
+    refreshChanges: () => useScm.getState().refresh(),
 
     refreshInfo: async () => {
       const info = await ipc.workspace.current()

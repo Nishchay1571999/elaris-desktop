@@ -9,7 +9,7 @@ import { usePreferences } from "@/stores/preferences"
 
 import { SectionHeader } from "./settings-page"
 
-const GROUPS: CommandGroup[] = ["General", "Chat", "View", "Navigation"]
+const GROUPS: CommandGroup[] = ["General", "Chat", "View", "Git", "Navigation"]
 
 /** Every command with its shortcut; click one to record a new key. */
 export function KeyboardSettings() {

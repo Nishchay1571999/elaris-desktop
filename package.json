@@ -17,7 +17,8 @@
     "desktop:app": "tauri build --no-bundle",
     "desktop:build": "tauri build",
     "desktop:install": "scripts/install.sh",
-    "repos": "scripts/elaris-repos.sh"
+    "repos": "scripts/elaris-repos.sh",
+    "test": "vitest run"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",
@@ -52,6 +53,7 @@
     "@vitejs/plugin-react": "^6.1.2",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.9.3",
-    "vite": "^8.3.5"
+    "vite": "^8.3.5",
+    "vitest": "^5.1.0"
   }
 }

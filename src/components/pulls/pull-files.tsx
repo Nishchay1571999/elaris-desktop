@@ -1,18 +1,13 @@
 import { ChevronRight, LoaderCircle } from "lucide-react"
 import { memo, useMemo, useState } from "react"
 
-import { CodeText, DiffSign, diffRowClass } from "@/components/workspace/code"
+import { FOLD_LINES, PatchHunks, STATUS_TEXT } from "@/components/workspace/patch-files"
 import { useGh } from "@/hooks/use-gh"
-import { lineClass } from "@/lib/diff"
 import { ipc } from "@/lib/ipc"
 import { type PatchFile, parsePatch } from "@/lib/patch"
-import { highlightDiff, languageOf } from "@/lib/syntax"
 import { cn } from "@/lib/utils"
 
 import { DiffStat } from "./pr-bits"
-
-/** Big files start folded so the page stays quick. */
-const FOLD_LINES = 400
 
 /** Every file the pull request changes, each a foldable diff. */
 export function PullFiles({
@@ -59,14 +54,6 @@ export function PullFiles({
   )
 }
 
-const STATUS_TEXT: Record<PatchFile["status"], string> = {
-  added: "Added",
-  deleted: "Deleted",
-  renamed: "Renamed",
-  modified: "",
-  binary: "Binary",
-}
-
 const FileDiff = memo(function FileDiff({
   file,
   viewed,
@@ -101,32 +88,7 @@ const FileDiff = memo(function FileDiff({
           Viewed
         </label>
       </header>
-      {shown && <Hunks file={file} />}
+      {shown && <PatchHunks file={file} />}
     </section>
   )
 })
-
-function Hunks({ file }: { file: PatchFile }) {
-  const coloured = useMemo(() => highlightDiff(file.lines, languageOf(file.path), true), [file])
-  if (file.status === "binary" || file.lines.length === 0) {
-    return <p className="px-4 py-3 text-xs text-muted-foreground">{file.status === "binary" ? "Binary file not shown." : "No content changes."}</p>
-  }
-  return (
-    <pre className="selectable overflow-x-auto py-1 font-mono text-[12px] leading-5">
-      {file.lines.map((line, i) =>
-        coloured[i] ? (
-          <div key={i} className={cn("flex min-w-max pr-4 pl-3", diffRowClass(line[0]))}>
-            <DiffSign sign={line[0]} />
-            <span>
-              <CodeText line={coloured[i]} />
-            </span>
-          </div>
-        ) : (
-          <div key={i} className={cn("min-w-max px-3", line.startsWith("@@") ? "bg-brand-soft text-muted-foreground" : lineClass(line))}>
-            {line || " "}
-          </div>
-        ),
-      )}
-    </pre>
-  )
-}

@@ -8,4 +8,8 @@ local: Array<string>,
 /**
  * Remote branches with no local branch of the same name, as `origin/name`.
  */
-remote: Array<string>, };
+remote: Array<string>, 
+/**
+ * Every remote branch, as `origin/name`, sorted.
+ */
+allRemote: Array<string>, };

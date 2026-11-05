@@ -1,14 +1,28 @@
-use std::path::{Path, PathBuf};
-use std::process::Command;
+//! Git for the workspace: libgit2 for quick reads, the git CLI (through
+//! [`runner`]) for everything that changes the repository.
 
-use git2::{BranchType, DiffFormat, DiffOptions, ErrorCode, Repository, Status, StatusOptions};
+pub(crate) mod diff;
+pub(crate) mod log;
+pub(crate) mod ops;
+pub mod runner;
+pub(crate) mod status;
+
+use std::path::{Path, PathBuf};
+
+use git2::{BranchType, DiffFormat, DiffOptions, ErrorCode, Repository};
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::{Error, Result, relative};
+use crate::{Error, Result};
+
+pub use diff::DiffSide;
+pub use log::{CommitDetail, GraphCommit, LogOptions};
+pub use ops::{CommitOptions, FetchOptions, Progress, PullOptions, PushOptions, RemoteEntry, StashEntry, StashOptions, TagEntry};
+pub use runner::GitOutputEntry;
+pub use status::{RepoOperation, ScmFile, ScmStatus};
 
 /// Diffs beyond this size are cut off; the view says so.
-const DIFF_LIMIT: usize = 512 * 1024;
+pub(crate) const DIFF_LIMIT: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "lowercase")]
@@ -73,6 +87,8 @@ pub struct Branches {
     pub local: Vec<String>,
     /// Remote branches with no local branch of the same name, as `origin/name`.
     pub remote: Vec<String>,
+    /// Every remote branch, as `origin/name`, sorted.
+    pub all_remote: Vec<String>,
 }
 
 pub(crate) fn branches(root: &Path) -> Result<Branches> {
@@ -89,13 +105,15 @@ pub(crate) fn branches(root: &Path) -> Result<Branches> {
             BranchType::Remote => {}
         }
     }
+    remote.sort();
+    let all_remote = remote.clone();
     remote.retain(|name| {
         let short = name.split_once('/').map_or(name.as_str(), |(_, s)| s);
         !local.iter().any(|l| l == short)
     });
     local.sort();
     remote.sort();
-    Ok(Branches { local, remote })
+    Ok(Branches { local, remote, all_remote })
 }
 
 /// Checks out `name`. A remote branch (`origin/feature`) gets a local
@@ -146,18 +164,18 @@ fn carry_changes(root: &Path, switch_args: &[&str], name: &str) -> Result<()> {
     })
 }
 
-/// Runs the git CLI in `root`; on failure, the error holds what it printed.
 fn run_git(root: &Path, args: &[&str]) -> Result<()> {
-    let output = Command::new("git").args(args).current_dir(root).output()?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    Err(Error::GitCommand(if message.is_empty() { format!("git {} failed", args.join(" ")) } else { message }))
+    runner::git(root, args).map(drop)
+}
+
+/// The top of the work tree containing `root`.
+pub(crate) fn toplevel(root: &Path) -> Result<PathBuf> {
+    let (repo, _) = open(root)?;
+    Ok(repo.workdir().ok_or_else(|| Error::NotARepository(root.display().to_string()))?.to_path_buf())
 }
 
 /// The repository containing `root`, and `root`'s path inside its work tree.
-fn open(root: &Path) -> Result<(Repository, PathBuf)> {
+pub(crate) fn open(root: &Path) -> Result<(Repository, PathBuf)> {
     let repo = Repository::discover(root)
         .map_err(|_| Error::NotARepository(root.display().to_string()))?;
     let workdir = repo
@@ -168,43 +186,9 @@ fn open(root: &Path) -> Result<(Repository, PathBuf)> {
     Ok((repo, prefix))
 }
 
+/// One entry per changed file, staged and unstaged together.
 pub(crate) fn status(root: &Path) -> Result<Vec<ChangedFile>> {
-    let (repo, prefix) = open(root)?;
-    let mut options = StatusOptions::new();
-    options
-        .include_untracked(true)
-        .recurse_untracked_dirs(true)
-        .renames_head_to_index(true)
-        .renames_index_to_workdir(true);
-
-    let mut changes = Vec::new();
-    for entry in repo.statuses(Some(&mut options))?.iter() {
-        let Some(path) = entry.path() else { continue };
-        let Some(path) = relative(&prefix, Path::new(path)) else { continue };
-        if let Some(kind) = classify(entry.status()) {
-            changes.push(ChangedFile { path, kind });
-        }
-    }
-    changes.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(changes)
-}
-
-fn classify(status: Status) -> Option<ChangeKind> {
-    Some(if status.is_conflicted() {
-        ChangeKind::Conflicted
-    } else if status.intersects(Status::INDEX_RENAMED | Status::WT_RENAMED) {
-        ChangeKind::Renamed
-    } else if status.intersects(Status::INDEX_DELETED | Status::WT_DELETED) {
-        ChangeKind::Deleted
-    } else if status.contains(Status::INDEX_NEW) {
-        ChangeKind::Added
-    } else if status.contains(Status::WT_NEW) {
-        ChangeKind::Untracked
-    } else if status.intersects(Status::INDEX_MODIFIED | Status::WT_MODIFIED | Status::INDEX_TYPECHANGE | Status::WT_TYPECHANGE) {
-        ChangeKind::Modified
-    } else {
-        return None;
-    })
+    Ok(status::flatten(&status::scm_status(root)?))
 }
 
 pub(crate) fn diff(root: &Path, rel: &str) -> Result<String> {

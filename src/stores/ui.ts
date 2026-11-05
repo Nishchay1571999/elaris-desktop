@@ -1,5 +1,6 @@
 import { create } from "zustand"
 
+import type { DiffSide } from "@/bindings/DiffSide"
 import { agentTabKey, isAgentTab } from "@/lib/agents"
 import { errorMessage } from "@/lib/ipc"
 import { adoptAgentTerminal, createShell, disposeAllTerminals, disposeTerminal, isTerminalTab } from "@/lib/terminals"
@@ -19,7 +20,16 @@ export type SettingsSection = "appearance" | "chat" | "keyboard" | "github" | "a
 /** What the centre pane shows. */
 export type MainView =
   | { kind: "chat" }
-  | { kind: "diff"; path: string }
+  /** One file's changes; `side` picks staged, unstaged or untracked (default: both, against HEAD). */
+  | { kind: "diff"; path: string; side?: DiffSide }
+  /** Every branch's history as a graph. */
+  | { kind: "graph" }
+  /** One commit: its message and changes. */
+  | { kind: "commit"; sha: string }
+  /** What a stash holds. */
+  | { kind: "stash"; index: number; message: string }
+  /** Every git command the app ran, and what git said. */
+  | { kind: "gitOutput" }
   | { kind: "planned"; item: CustomizationId }
   | { kind: "settings"; section: SettingsSection }
   /**

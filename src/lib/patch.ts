@@ -47,3 +47,28 @@ export function parsePatch(patch: string): PatchFile[] {
   for (const f of files) while (f.lines.at(-1) === "") f.lines.pop()
   return files
 }
+
+/** A one-file diff split for hunk staging: the file header, then each hunk from its `@@` line. */
+export interface SplitDiff {
+  header: string[]
+  hunks: string[][]
+}
+
+export function splitHunks(diff: string): SplitDiff {
+  const lines = diff.split("\n")
+  // The diff ends with a newline, leaving an empty last line.
+  while (lines.at(-1) === "") lines.pop()
+  const header: string[] = []
+  const hunks: string[][] = []
+  for (const line of lines) {
+    if (line.startsWith("@@")) hunks.push([line])
+    else if (hunks.length) hunks[hunks.length - 1].push(line)
+    else header.push(line)
+  }
+  return { header, hunks }
+}
+
+/** A patch of just one hunk, for `git apply --recount`. */
+export function hunkPatch({ header }: SplitDiff, hunk: string[]): string {
+  return `${[...header, ...hunk].join("\n")}\n`
+}
