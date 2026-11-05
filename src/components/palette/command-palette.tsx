@@ -15,7 +15,7 @@ import { useSessions, useSettings } from "@/stores/sessions"
 import { useCurrent, useUi } from "@/stores/ui"
 import { useWorkspace } from "@/stores/workspace"
 
-const GROUPS: CommandGroup[] = ["General", "Chat", "View", "Navigation"]
+const GROUPS: CommandGroup[] = ["General", "Chat", "View", "Git", "Navigation"]
 
 // Each item's value is what's searched, then an id after this mark to keep values unique.
 const ID_MARK = "\u0001"

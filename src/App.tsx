@@ -13,9 +13,13 @@ import { CreatePrDialog } from "@/components/pulls/create-pr-dialog"
 import { TrackerPage } from "@/components/pulls/pulls-page"
 import { SkillsPage } from "@/components/customizations/skills-page"
 import { ToolsPage } from "@/components/customizations/tools-page"
+import { CommitGraph } from "@/components/scm/commit-graph"
+import { CommitView, StashView } from "@/components/scm/commit-view"
+import { GitOutputView } from "@/components/scm/git-output"
 import { SettingsPage } from "@/components/settings/settings-page"
 import { Sidebar } from "@/components/sidebar/sidebar"
 import { Titlebar } from "@/components/titlebar/titlebar"
+import { QuickInput } from "@/components/ui/quick-input"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { DiffView } from "@/components/workspace/diff-view"
 import { OpeningBar } from "@/components/workspace/opening-bar"
@@ -23,6 +27,8 @@ import { RightPanel } from "@/components/workspace/right-panel"
 import { useCtrlClipboard } from "@/hooks/use-ctrl-clipboard"
 import { useShortcuts } from "@/hooks/use-shortcuts"
 import { type AgentTerminal, ipc } from "@/lib/ipc"
+import { showOutput } from "@/lib/scm-actions"
+import { useGitOutput } from "@/stores/git-output"
 import { useGitHub } from "@/stores/github"
 import { useSessions } from "@/stores/sessions"
 import { type CustomizationId, useCurrent, useUi } from "@/stores/ui"
@@ -36,6 +42,7 @@ export function App() {
     void useSessions.getState().refresh()
     void useSessions.getState().resumeLive()
     void useWorkspace.getState().init()
+    void useGitOutput.getState().init()
     // Shells a reloaded window left behind have no tab any more.
     void ipc.terminal.closeAll()
   }, [])
@@ -76,6 +83,7 @@ export function App() {
       <CommandPalette />
       <CreatePrDialog />
       <ConnectGitHubDialog />
+      <QuickInput />
     </TooltipProvider>
   )
 }
@@ -170,7 +178,15 @@ function MainView() {
     case "chat":
       return <ChatView sessionId={sessionId} />
     case "diff":
-      return <DiffView key={view.path} path={view.path} />
+      return <DiffView key={`${view.path}:${view.side ?? ""}`} path={view.path} side={view.side} />
+    case "graph":
+      return <CommitGraph />
+    case "commit":
+      return <CommitView key={view.sha} sha={view.sha} />
+    case "stash":
+      return <StashView key={view.index} index={view.index} message={view.message} />
+    case "gitOutput":
+      return <GitOutputView />
     case "planned":
       return <CustomizationView item={view.item} />
     case "settings":
@@ -218,7 +234,12 @@ function ErrorToast() {
       role="alert"
       className="fixed right-4 bottom-4 z-50 flex max-w-sm items-start gap-3 rounded-lg border border-border-strong bg-popover px-3 py-2 text-[13px] shadow-xl"
     >
-      <span className="flex-1 text-destructive">{message}</span>
+      <span className="selectable max-h-48 flex-1 overflow-y-auto whitespace-pre-wrap text-destructive">{message}</span>
+      {workspaceError && !sessionError && (
+        <button type="button" onClick={showOutput} className="shrink-0 text-xs text-muted-foreground hover:text-foreground">
+          Git output
+        </button>
+      )}
       <button
         type="button"
         onClick={() => {

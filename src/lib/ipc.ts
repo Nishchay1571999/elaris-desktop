@@ -10,6 +10,20 @@ import { ask, open } from "@tauri-apps/plugin-dialog"
 import type { AgentEvent } from "@/bindings/AgentEvent"
 import type { Branches } from "@/bindings/Branches"
 import type { ChangedFile } from "@/bindings/ChangedFile"
+import type { CommitDetail } from "@/bindings/CommitDetail"
+import type { CommitOptions } from "@/bindings/CommitOptions"
+import type { DiffSide } from "@/bindings/DiffSide"
+import type { FetchOptions } from "@/bindings/FetchOptions"
+import type { GitOutputEntry } from "@/bindings/GitOutputEntry"
+import type { GraphCommit } from "@/bindings/GraphCommit"
+import type { LogOptions } from "@/bindings/LogOptions"
+import type { PullOptions } from "@/bindings/PullOptions"
+import type { PushOptions } from "@/bindings/PushOptions"
+import type { RemoteEntry } from "@/bindings/RemoteEntry"
+import type { ScmStatus } from "@/bindings/ScmStatus"
+import type { StashEntry } from "@/bindings/StashEntry"
+import type { StashOptions } from "@/bindings/StashOptions"
+import type { TagEntry } from "@/bindings/TagEntry"
 import type { ContextSummary } from "@/bindings/ContextSummary"
 import type { ItemSummary } from "@/bindings/ItemSummary"
 import type { FileEntry } from "@/bindings/FileEntry"
@@ -58,6 +72,10 @@ export const ipc = {
     recent: () => invoke<string[]>("workspace_recent"),
     listDir: (path: string) => invoke<FileEntry[]>("workspace_list_dir", { path }),
     readFile: (path: string) => invoke<FilePreview>("workspace_read_file", { path }),
+    /** Opens a workspace file in its default app. */
+    openFile: (path: string) => invoke<void>("workspace_open_file", { path }),
+    /** Shows a workspace file in Finder. */
+    reveal: (path: string) => invoke<void>("workspace_reveal", { path }),
     /** Any folder's favicon or `logo.*` as a `data:` URL, or null. */
     logo: (path: string) => invoke<string | null>("workspace_logo", { path }),
     /** An image file (absolute path) as a `data:` URL, for a custom logo. */
@@ -67,19 +85,93 @@ export const ipc = {
       listen<{ paths: string[] }>("workspace://changed", (event) => handler(event.payload.paths)),
   },
   git: {
+    /** Makes the open folder a git repository. */
+    init: () => invoke<void>("git_init"),
     status: () => invoke<ChangedFile[]>("git_status"),
+    /** Staged, unstaged, untracked and conflicted files; null outside a repository. */
+    scmStatus: () => invoke<ScmStatus | null>("git_scm_status"),
+    /** A file's changes against HEAD, staged and unstaged together. */
     diff: (path: string) => invoke<string>("git_diff", { path }),
+    /** One side of a file's changes; headers name the file from the repository root. */
+    diffFile: (path: string, side: DiffSide) => invoke<string>("git_diff_file", { path, side }),
+    /** Stages (`cached`), unstages (`cached` + `reverse`) or reverts (`reverse`) a hunk. */
+    applyPatch: (patch: string, cached: boolean, reverse: boolean) =>
+      invoke<void>("git_apply_patch", { patch, cached, reverse }),
+    stage: (paths: string[]) => invoke<void>("git_stage", { paths }),
+    stageAll: () => invoke<void>("git_stage_all"),
+    unstage: (paths: string[]) => invoke<void>("git_unstage", { paths }),
+    unstageAll: () => invoke<void>("git_unstage_all"),
+    /** Reverts work-tree changes; untracked files go to the Trash. */
+    discard: (paths: string[]) => invoke<void>("git_discard", { paths }),
+    discardAll: () => invoke<void>("git_discard_all"),
+    ignore: (path: string) => invoke<void>("git_ignore", { path }),
     branches: () => invoke<Branches>("git_branches"),
     /** Checks out `name`; a remote branch (`origin/name`) becomes a local tracking branch. */
     switch: (name: string) => invoke<void>("git_switch", { name }),
-    /** Creates a branch from HEAD and switches to it, keeping uncommitted changes. */
-    createBranch: (name: string) => invoke<void>("git_create_branch", { name }),
-    /** Stages `paths` (or everything) and commits; returns the short hash. */
-    commit: (message: string, paths: string[] | null) =>
-      invoke<string>("git_commit", { request: { message, paths } }),
-    push: () => invoke<void>("git_push"),
+    /** Creates a branch from `from` (default HEAD) and switches to it, keeping uncommitted changes. */
+    createBranch: (name: string, from?: string) => invoke<void>("git_create_branch", { name, from: from ?? null }),
+    renameBranch: (old: string, name: string) => invoke<void>("git_rename_branch", { old, new: name }),
+    deleteBranch: (name: string, force = false) => invoke<void>("git_delete_branch", { name, force }),
+    deleteRemoteBranch: (name: string) => invoke<void>("git_delete_remote_branch", { name }),
+    merge: (name: string) => invoke<void>("git_merge", { name }),
+    rebase: (onto: string) => invoke<void>("git_rebase", { onto }),
+    checkoutCommit: (sha: string) => invoke<void>("git_checkout_commit", { sha }),
+    cherryPick: (sha: string) => invoke<void>("git_cherry_pick", { sha }),
+    revert: (sha: string) => invoke<void>("git_revert", { sha }),
+    abortOperation: () => invoke<void>("git_abort_operation"),
+    continueOperation: () => invoke<void>("git_continue_operation"),
+    /**
+     * Commits; returns the short hash. With neither `paths` nor `stagedOnly`, every change in
+     * the folder is staged first. `paths` commits just those files.
+     */
+    commit: (message: string, paths: string[] | null, options: Partial<Omit<CommitOptions, "message" | "paths">> = {}) =>
+      invoke<string>("git_commit", { request: { message, paths, ...options } }),
+    lastCommitMessage: () => invoke<string>("git_last_commit_message"),
+    /** Undoes the last commit, keeping its changes staged; returns its message. */
+    undoLastCommit: () => invoke<string>("git_undo_last_commit"),
+    /** Recent authors as `Name <email>`, for co-author trailers. */
+    authors: () => invoke<string[]>("git_authors"),
+    fetch: (options: Partial<FetchOptions> = {}, onProgress?: (line: string) => void) =>
+      invoke<void>("git_fetch", { options, onProgress: lines(onProgress) }),
+    pull: (options: Partial<PullOptions> = {}, onProgress?: (line: string) => void) =>
+      invoke<void>("git_pull", { options, onProgress: lines(onProgress) }),
+    /** Pushes the current branch; one without an upstream is published. */
+    push: (options: Partial<PushOptions> = {}, onProgress?: (line: string) => void) =>
+      invoke<void>("git_push", { options, onProgress: lines(onProgress) }),
+    /** Pulls if behind, then pushes. */
+    sync: (rebase = false, onProgress?: (line: string) => void) =>
+      invoke<void>("git_sync", { rebase, onProgress: lines(onProgress) }),
+    /** Clones into a new folder inside `parent`; resolves to the folder. */
+    clone: (url: string, parent: string, onProgress?: (line: string) => void) =>
+      invoke<string>("git_clone", { url, parent, onProgress: lines(onProgress) }),
+    stashes: () => invoke<StashEntry[]>("git_stashes"),
+    stash: (options: Partial<StashOptions> = {}) => invoke<void>("git_stash", { options }),
+    stashApply: (index: number, pop: boolean) => invoke<void>("git_stash_apply", { index, pop }),
+    stashDrop: (index: number) => invoke<void>("git_stash_drop", { index }),
+    stashClear: () => invoke<void>("git_stash_clear"),
+    stashShow: (index: number) => invoke<string>("git_stash_show", { index }),
+    tags: () => invoke<TagEntry[]>("git_tags"),
+    /** Tags `target` (default HEAD); a message makes it annotated. */
+    createTag: (name: string, message?: string, target?: string) =>
+      invoke<void>("git_create_tag", { name, message: message ?? null, target: target ?? null }),
+    deleteTag: (name: string) => invoke<void>("git_delete_tag", { name }),
+    pushTags: (remote?: string, onProgress?: (line: string) => void) =>
+      invoke<void>("git_push_tags", { remote: remote ?? null, onProgress: lines(onProgress) }),
+    deleteRemoteTag: (remote: string, name: string) => invoke<void>("git_delete_remote_tag", { remote, name }),
+    remotes: () => invoke<RemoteEntry[]>("git_remotes"),
+    addRemote: (name: string, url: string) => invoke<void>("git_add_remote", { name, url }),
+    removeRemote: (name: string) => invoke<void>("git_remove_remote", { name }),
+    renameRemote: (old: string, name: string) => invoke<void>("git_rename_remote", { old, new: name }),
+    /** Commits for the graph, newest first, children before parents. */
+    log: (options: Partial<LogOptions> = {}) => invoke<GraphCommit[]>("git_log", { options }),
+    show: (sha: string) => invoke<CommitDetail>("git_show", { sha }),
     /** Commits on this branch that `base` lacks, oldest first. */
     logRange: (base: string) => invoke<Array<{ subject: string; body: string }>>("git_log_range", { base }),
+    /** Git commands run so far this session, oldest first. */
+    outputHistory: () => invoke<GitOutputEntry[]>("git_output_history"),
+    /** Each git command as it finishes. */
+    onOutput: (handler: (entry: GitOutputEntry) => void): Promise<UnlistenFn> =>
+      listen<GitOutputEntry>("git://output", (event) => handler(event.payload)),
   },
   github: {
     status: () => invoke<GhStatus>("gh_status"),
@@ -261,8 +353,8 @@ export const ipc = {
       })
       return typeof picked === "string" ? picked : null
     },
-    pickFolder: async () => {
-      const picked = await open({ directory: true, multiple: false, title: "Open folder" })
+    pickFolder: async (title = "Open folder") => {
+      const picked = await open({ directory: true, multiple: false, title })
       return typeof picked === "string" ? picked : null
     },
     confirm: (message: string, title: string, okLabel = "Delete") =>
@@ -287,6 +379,13 @@ export interface NewImage {
 function channel(onEvent: (event: AgentEvent) => void): Channel<AgentEvent> {
   const channel = new Channel<AgentEvent>()
   channel.onmessage = onEvent
+  return channel
+}
+
+/** A channel for git's progress lines; a no-op one when nobody is listening. */
+function lines(onLine?: (line: string) => void): Channel<string> {
+  const channel = new Channel<string>()
+  if (onLine) channel.onmessage = onLine
   return channel
 }
 

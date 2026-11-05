@@ -23,8 +23,6 @@ pub enum CommandError {
     Image(String),
     #[error("{0}")]
     Agent(String),
-    #[error("{0}")]
-    Git(String),
     /// A `gh` failure. Sent as `gh:<kind>: message` so the UI can offer to
     /// install gh or sign in instead of only showing the error.
     #[error("gh:{kind}: {message}")]

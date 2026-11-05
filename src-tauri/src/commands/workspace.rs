@@ -60,6 +60,25 @@ pub async fn workspace_read_file(state: State<'_, AppState>, path: String) -> Co
 
 /// The folder's logo (its favicon or `logo.*`, see `workspace::find_logo`) as a `data:` URL,
 /// or null when it has none. Works for any folder, not only the open one.
+/// Opens a workspace file in its default app.
+#[tauri::command]
+pub fn workspace_open_file(state: State<'_, AppState>, path: String) -> CommandResult<()> {
+    let file = state.require_workspace()?.absolute(&path)?;
+    crate::shell::open_url(&file.to_string_lossy());
+    Ok(())
+}
+
+/// Shows a workspace file selected in Finder (or the file manager).
+#[tauri::command]
+pub fn workspace_reveal(state: State<'_, AppState>, path: String) -> CommandResult<()> {
+    let file = state.require_workspace()?.absolute(&path)?;
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg("-R").arg(&file).stdin(std::process::Stdio::null()).spawn();
+    #[cfg(not(target_os = "macos"))]
+    crate::shell::open_url(&file.parent().unwrap_or(&file).to_string_lossy());
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn workspace_logo(path: String) -> CommandResult<Option<String>> {
     blocking(move || {

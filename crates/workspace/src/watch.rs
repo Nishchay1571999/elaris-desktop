@@ -15,7 +15,8 @@ pub struct Watcher {
 impl Watcher {
     /// Calls `on_change` with relative paths roughly 300 ms after activity
     /// settles. Churn inside `.git` is dropped except for the files that change
-    /// what `git status` reports (index, HEAD, refs).
+    /// what the Source Control panel shows (index, HEAD, refs, and
+    /// the markers of a merge or rebase in progress).
     ///
     /// Runs without a file-ID cache: on macOS the default one stats every
     /// file under `root` (node_modules, target, symlinks followed) before
@@ -50,7 +51,14 @@ impl Watcher {
 
 fn is_interesting(path: &str) -> bool {
     match path.strip_prefix(".git/") {
-        Some(inner) => inner == "index" || inner == "HEAD" || inner.starts_with("refs/"),
+        // What status, the branch, ahead/behind, stashes and a stopped
+        // merge or rebase are read from.
+        Some(inner) => {
+            matches!(inner, "index" | "HEAD" | "packed-refs" | "FETCH_HEAD" | "MERGE_HEAD" | "CHERRY_PICK_HEAD" | "REVERT_HEAD")
+                || inner.starts_with("refs/")
+                || inner.starts_with("rebase-merge")
+                || inner.starts_with("rebase-apply")
+        }
         None => path != ".git",
     }
 }
