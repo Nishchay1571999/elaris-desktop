@@ -51,7 +51,26 @@ pub enum AgentEvent {
     Question { request_id: String, questions: Vec<Question> },
     QuestionResolved { request_id: String },
     /// Tokens used since the last `usage` event; add them up for the total.
-    Usage { usage: TokenUsage },
+    /// `context` is the prompt size of the main agent's latest model call: how
+    /// full its context window is. Subagents' calls leave it out.
+    Usage {
+        usage: TokenUsage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "number")]
+        context: Option<u64>,
+    },
+    /// The agent changed mode on its own: it entered plan mode, or left it
+    /// once the user approved the plan. The chat takes this as its mode.
+    Mode { mode: AgentMode },
+    /// A subagent started, or a finished one was resumed. `agent` is the SDK's
+    /// id for it, the same on every run; `tool_id` is the `Agent` call that
+    /// spawned it.
+    SubagentStart { agent: String, tool_id: Option<String>, description: String },
+    /// Something a subagent did: a `text-delta`, `tool-start` or `tool-end`.
+    Subagent { agent: String, event: Box<AgentEvent> },
+    /// The user sent a subagent `text` from its tab.
+    SubagentInput { agent: String, text: String },
+    SubagentEnd { agent: String, status: SubagentStatus },
     Finish,
     Stopped,
     Error { message: String },
@@ -118,6 +137,31 @@ pub struct Question {
 pub struct QuestionOption {
     pub label: String,
     pub description: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum SubagentStatus {
+    Running,
+    Completed,
+    Failed,
+    Stopped,
+}
+
+/// What a subagent did during one reply. A subagent the user talks to again
+/// shows up in each reply that resumed it, under the same `id`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct Subagent {
+    pub id: String,
+    /// The `Agent` tool call that spawned it, if this reply did.
+    pub tool_id: Option<String>,
+    pub description: String,
+    pub status: SubagentStatus,
+    /// Its text and tool calls, and what the user sent it, in order.
+    pub parts: Vec<Part>,
 }
 
 /// The user's reply to a `permission-request`.
@@ -227,6 +271,10 @@ pub enum Part {
         #[serde(default)]
         output: Option<String>,
     },
+    /// A message the user sent a subagent from its tab. Only in [`Subagent::parts`].
+    Input {
+        text: String,
+    },
 }
 
 /// An image the user attached to a message. The file lives in the app's data
@@ -257,6 +305,9 @@ pub struct Message {
     /// Images the user attached. Empty for assistant messages.
     #[serde(default)]
     pub images: Vec<ImageAttachment>,
+    /// Subagents the reply started or resumed. Empty for user messages.
+    #[serde(default)]
+    pub agents: Vec<Subagent>,
     /// Epoch milliseconds.
     #[ts(type = "number")]
     pub created_at: i64,
@@ -273,34 +324,36 @@ impl Message {
         match event {
             AgentEvent::TextDelta { delta } => {
                 self.content.push_str(delta);
-                match self.parts.last_mut() {
-                    Some(Part::Text { text }) => text.push_str(delta),
-                    _ => self.parts.push(Part::Text { text: delta.clone() }),
+                fold(&mut self.parts, event);
+            }
+            AgentEvent::ToolStart { .. } | AgentEvent::ToolEnd { .. } => fold(&mut self.parts, event),
+            AgentEvent::SubagentStart { agent, tool_id, description } => {
+                let subagent = self.subagent(agent);
+                subagent.status = SubagentStatus::Running;
+                if subagent.tool_id.is_none() {
+                    subagent.tool_id.clone_from(tool_id);
+                }
+                if subagent.description.is_empty() {
+                    subagent.description.clone_from(description);
                 }
             }
-            AgentEvent::ToolStart { id, name, summary, input } => self.parts.push(Part::Tool {
-                id: id.clone(),
-                name: name.clone(),
-                summary: summary.clone(),
-                status: ToolStatus::Running,
-                input: input.clone(),
-                output: None,
-            }),
-            AgentEvent::ToolEnd { id, ok, output } => {
-                for part in &mut self.parts {
-                    if let Part::Tool { id: tool_id, status, output: tool_output, .. } = part
-                        && tool_id == id
-                    {
-                        *status = if *ok { ToolStatus::Done } else { ToolStatus::Failed };
-                        tool_output.clone_from(output);
-                    }
-                }
+            AgentEvent::Subagent { agent, event } => fold(&mut self.subagent(agent).parts, event),
+            AgentEvent::SubagentInput { agent, text } => {
+                let subagent = self.subagent(agent);
+                subagent.status = SubagentStatus::Running;
+                subagent.parts.push(Part::Input { text: text.clone() });
+            }
+            AgentEvent::SubagentEnd { agent, status } => {
+                let subagent = self.subagent(agent);
+                subagent.status = *status;
+                fail_running(&mut subagent.parts);
             }
             AgentEvent::PermissionRequest { .. }
             | AgentEvent::PermissionResolved { .. }
             | AgentEvent::Question { .. }
             | AgentEvent::QuestionResolved { .. }
-            | AgentEvent::Usage { .. } => {}
+            | AgentEvent::Usage { .. }
+            | AgentEvent::Mode { .. } => {}
             AgentEvent::Finish => self.finish(MessageStatus::Complete),
             AgentEvent::Stopped => self.finish(MessageStatus::Stopped),
             AgentEvent::Error { message } => {
@@ -310,13 +363,71 @@ impl Message {
         }
     }
 
-    /// Ends the message; tools still running can't finish any more.
+    /// Ends the message; tools and subagents still running can't finish any
+    /// more, as the agent process they ran in is gone.
     pub fn finish(&mut self, status: MessageStatus) {
         self.status = status;
-        for part in &mut self.parts {
-            if let Part::Tool { status: tool_status @ ToolStatus::Running, .. } = part {
-                *tool_status = ToolStatus::Failed;
+        fail_running(&mut self.parts);
+        for subagent in &mut self.agents {
+            if subagent.status == SubagentStatus::Running {
+                subagent.status = SubagentStatus::Stopped;
             }
+            fail_running(&mut subagent.parts);
+        }
+    }
+
+    /// This reply's record of subagent `id`, added if it's new.
+    fn subagent(&mut self, id: &str) -> &mut Subagent {
+        let at = match self.agents.iter().position(|a| a.id == id) {
+            Some(at) => at,
+            None => {
+                self.agents.push(Subagent {
+                    id: id.to_owned(),
+                    tool_id: None,
+                    description: String::new(),
+                    status: SubagentStatus::Running,
+                    parts: Vec::new(),
+                });
+                self.agents.len() - 1
+            }
+        };
+        &mut self.agents[at]
+    }
+}
+
+/// Folds a `text-delta`, `tool-start` or `tool-end` into `parts`.
+fn fold(parts: &mut Vec<Part>, event: &AgentEvent) {
+    match event {
+        AgentEvent::TextDelta { delta } => match parts.last_mut() {
+            Some(Part::Text { text }) => text.push_str(delta),
+            _ => parts.push(Part::Text { text: delta.clone() }),
+        },
+        AgentEvent::ToolStart { id, name, summary, input } => parts.push(Part::Tool {
+            id: id.clone(),
+            name: name.clone(),
+            summary: summary.clone(),
+            status: ToolStatus::Running,
+            input: input.clone(),
+            output: None,
+        }),
+        AgentEvent::ToolEnd { id, ok, output } => {
+            for part in parts {
+                if let Part::Tool { id: tool_id, status, output: tool_output, .. } = part
+                    && tool_id == id
+                {
+                    *status = if *ok { ToolStatus::Done } else { ToolStatus::Failed };
+                    tool_output.clone_from(output);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn fail_running(parts: &mut [Part]) {
+    for part in parts {
+        if let Part::Tool { status: status @ ToolStatus::Running, .. } = part {
+            *status = ToolStatus::Failed;
         }
     }
 }
@@ -373,6 +484,11 @@ pub struct Session {
     /// Tokens used by every reply so far. Chats from before this was kept start at zero.
     #[serde(default)]
     pub usage: TokenUsage,
+    /// Prompt tokens of the main agent's latest model call, so how full its
+    /// context window is. Zero until a reply reports it.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub context: u64,
     pub messages: Vec<Message>,
 }
 
@@ -403,15 +519,21 @@ pub struct SessionSummary {
     #[ts(type = "number")]
     pub updated_at: i64,
     pub workspace: Option<String>,
+    /// The start of the chat's first message, on one line.
+    pub preview: String,
 }
 
 impl From<&Session> for SessionSummary {
     fn from(session: &Session) -> Self {
+        const MAX: usize = 120;
+        let first = session.messages.iter().find(|m| m.role == MessageRole::User);
+        let line = first.map(|m| m.content.split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default();
         Self {
             id: session.id.clone(),
             title: session.title.clone(),
             updated_at: session.updated_at,
             workspace: session.workspace.clone(),
+            preview: line.chars().take(MAX).collect(),
         }
     }
 }
@@ -469,6 +591,7 @@ mod tests {
             content: String::new(),
             parts: Vec::new(),
             images: Vec::new(),
+            agents: Vec::new(),
             created_at: 0,
             status: MessageStatus::Streaming,
             error: None,
@@ -523,6 +646,29 @@ mod tests {
         });
         message.apply(&AgentEvent::Stopped);
         assert!(matches!(message.parts[0], Part::Tool { status: ToolStatus::Failed, .. }));
+    }
+
+    #[test]
+    fn folds_subagent_work_apart_from_the_reply() {
+        let mut message = reply();
+        let sub = |event| AgentEvent::Subagent { agent: "a1".into(), event: Box::new(event) };
+        for event in [
+            AgentEvent::SubagentStart { agent: "a1".into(), tool_id: Some("t".into()), description: "Explore".into() },
+            sub(AgentEvent::TextDelta { delta: "Reading.".into() }),
+            sub(AgentEvent::ToolStart { id: "r".into(), name: "Read".into(), summary: "a.rs".into(), input: json!({}) }),
+            AgentEvent::SubagentEnd { agent: "a1".into(), status: SubagentStatus::Completed },
+            AgentEvent::SubagentInput { agent: "a1".into(), text: "And b.rs?".into() },
+            AgentEvent::Stopped,
+        ] {
+            message.apply(&event);
+        }
+        assert!(message.parts.is_empty() && message.content.is_empty());
+        let agent = &message.agents[0];
+        assert_eq!((agent.tool_id.as_deref(), agent.description.as_str()), (Some("t"), "Explore"));
+        // Resumed by the input, then cut off with the reply.
+        assert_eq!(agent.status, SubagentStatus::Stopped);
+        assert!(matches!(agent.parts[1], Part::Tool { status: ToolStatus::Failed, .. }));
+        assert_eq!(agent.parts[2], Part::Input { text: "And b.rs?".into() });
     }
 
     #[test]

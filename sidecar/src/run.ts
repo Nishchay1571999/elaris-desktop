@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto"
-import { realpathSync } from "node:fs"
+import { existsSync, realpathSync } from "node:fs"
 import { readFile } from "node:fs/promises"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 
 import {
   type CanUseTool,
@@ -9,6 +11,7 @@ import {
   type PermissionResult,
   type PermissionRuleValue,
   type PermissionUpdate,
+  type Query,
   query,
   type SDKMessage,
   type SDKUserMessage,
@@ -17,14 +20,22 @@ import {
 import { clipInput, toolOutput } from "./clip.js"
 import {
   type AgentEvent,
+  type AgentMode,
   type Answers,
   type Command,
+  type ContextsRequest,
+  type DesktopRequest,
+  type DeviceRequest,
   log,
   type PermissionDecision,
+  type PermissionPolicy,
   type Question,
   send,
   type TerminalRequest,
 } from "./protocol.js"
+import { CONTEXTS_SERVER, type ContextsResult, contextsServer, SAFE_CONTEXT_TOOLS } from "./contexts.js"
+import { DESKTOP_SERVER, type DesktopResult, desktopServer } from "./desktop.js"
+import { DEVICE_SERVER, deviceServer, SAFE_DEVICE_TOOLS } from "./device.js"
 import { summarize } from "./summary.js"
 import { SAFE_TERMINAL_TOOLS, TERMINAL_SERVER, type TerminalResult, terminalServer, terminalTool } from "./terminal.js"
 
@@ -32,18 +43,44 @@ type RunCommand = Extract<Command, { type: "run" }>
 
 interface Run {
   abort: AbortController
+  /** The SDK query, once started; settings changed mid-run go through it. */
+  query?: Query
+  model: string
+  policy: PermissionPolicy
+  /** The mode the agent is in, which it can change itself. */
+  modes: ModeTracker
   /** Pending permission prompts by request id. */
   permissions: Map<string, (decision: PermissionDecision) => void>
   /** Pending questions by request id. */
   questions: Map<string, (answers: Answers | null) => void>
-  /** Terminal calls waiting on the host, by request id. */
-  terminals: Map<string, (result: TerminalResult) => void>
+  /** Terminal, desktop, device and context calls waiting on the host, by request id. */
+  hostCalls: Map<string, (result: DesktopResult) => void>
 }
 
 const runs = new Map<string, Run>()
 
 export function interrupt(runId: string) {
   runs.get(runId)?.abort.abort()
+}
+
+/**
+ * Switches a running agent to the chat's new settings. Ask's tool restrictions
+ * are fixed when a run starts, so Ask only takes effect from the next message.
+ */
+export function updateSettings({ runId, mode, model, permissions }: Extract<Command, { type: "settings" }>) {
+  const run = runs.get(runId)
+  if (!run?.query) return
+  const failed = (what: string) => (error: unknown) =>
+    log(`switching ${what} for ${runId}: ${error instanceof Error ? error.message : String(error)}`)
+  if (mode !== run.modes.mode || permissions !== run.policy) {
+    run.modes.chose(mode)
+    run.policy = permissions
+    run.query.setPermissionMode(permissionMode({ mode, permissions })).catch(failed("permission mode"))
+  }
+  if (model !== run.model) {
+    run.model = model
+    run.query.setModel(model).catch(failed("model"))
+  }
 }
 
 export function answerPermission(runId: string, requestId: string, decision: PermissionDecision) {
@@ -54,8 +91,9 @@ export function answerQuestion(runId: string, requestId: string, answers: Answer
   runs.get(runId)?.questions.get(requestId)?.(answers)
 }
 
-export function answerTerminal(runId: string, requestId: string, result: TerminalResult) {
-  runs.get(runId)?.terminals.get(requestId)?.(result)
+/** Answers a terminal, desktop, device or context call the host carried out. */
+export function answerHost(runId: string, requestId: string, result: DesktopResult) {
+  runs.get(runId)?.hostCalls.get(requestId)?.(result)
 }
 
 export function interruptAll() {
@@ -67,19 +105,28 @@ export async function start(command: RunCommand) {
   const { runId } = command
   // Tools report resolved paths (/private/var vs /var on macOS).
   const cwd = resolveDir(command.cwd)
-  const run: Run = { abort: new AbortController(), permissions: new Map(), questions: new Map(), terminals: new Map() }
+  const emit = (event: AgentEvent) => send({ type: "event", runId, event })
+  const run: Run = {
+    abort: new AbortController(),
+    model: command.model,
+    policy: command.permissions,
+    modes: new ModeTracker(command.mode, emit),
+    permissions: new Map(),
+    questions: new Map(),
+    hostCalls: new Map(),
+  }
   runs.set(runId, run)
 
-  const emit = (event: AgentEvent) => send({ type: "event", runId, event })
-  const translator = new Translator(emit, cwd)
+  const translator = new Translator(emit, cwd, run.modes)
 
-  // Holds an image prompt's input open until the result, so the agent can
-  // still ask for permissions; closing it then lets the run end.
+  // Holds the prompt's input open until the result, so the agent can still
+  // ask for permissions and take new settings; closing it lets the run end.
   let closeInput = () => {}
   const inputDone = new Promise<void>((resolve) => (closeInput = resolve))
 
   try {
     const messages = query({ prompt: await prompt(command, inputDone), options: options(command, run, emit) })
+    run.query = messages
     for await (const message of messages) {
       if (!translator.sessionSent && message.session_id) {
         send({ type: "session", runId, agentSessionId: message.session_id })
@@ -101,7 +148,7 @@ export async function start(command: RunCommand) {
     closeInput()
     for (const resolve of run.permissions.values()) resolve("deny")
     for (const resolve of run.questions.values()) resolve(null)
-    for (const resolve of run.terminals.values()) resolve({ ok: false, text: "The run ended." })
+    for (const resolve of run.hostCalls.values()) resolve({ ok: false, text: "The run ended." })
     runs.delete(runId)
     send({ type: "done", runId })
   }
@@ -109,12 +156,11 @@ export async function start(command: RunCommand) {
 
 type ImageMediaType = "image/png" | "image/jpeg" | "image/gif" | "image/webp"
 
-/** The prompt text, or a user message carrying it and its images, kept open until `done`. */
-async function prompt(
-  { prompt: text, images = [] }: RunCommand,
-  done: Promise<void>,
-): Promise<string | AsyncIterable<SDKUserMessage>> {
-  if (images.length === 0) return text
+/**
+ * The prompt as a user message carrying its text and images, kept open until
+ * `done`: the SDK only takes mid-run setting changes on an open input.
+ */
+async function prompt({ prompt: text, images = [] }: RunCommand, done: Promise<void>): Promise<AsyncIterable<SDKUserMessage>> {
   const blocks = await Promise.all(
     images.map(async ({ mediaType, path }) => ({
       type: "image" as const,
@@ -123,7 +169,7 @@ async function prompt(
   )
   const message: SDKUserMessage = {
     type: "user",
-    message: { role: "user", content: text.trim() ? [...blocks, { type: "text", text }] : blocks },
+    message: { role: "user", content: blocks.length === 0 ? text : text.trim() ? [...blocks, { type: "text", text }] : blocks },
     parent_tool_use_id: null,
   }
   return (async function* () {
@@ -137,6 +183,27 @@ function resolveDir(dir: string): string {
     return realpathSync(dir)
   } catch {
     return dir
+  }
+}
+
+/** The sidecar's link to the SDK, which each `pnpm install` re-points at the current version. */
+const SDK_LINK = fileURLToPath(new URL("../node_modules/@anthropic-ai/claude-agent-sdk", import.meta.url))
+
+/**
+ * The SDK's native CLI binary, looked up fresh for each run. The SDK finds it
+ * relative to the copy of itself this process loaded, so after a reinstall
+ * swaps the versioned pnpm folders, a long-lived sidecar would look in a
+ * folder that's gone. Undefined leaves the lookup to the SDK.
+ */
+function claudeExecutable(): string | undefined {
+  const exe = process.platform === "win32" ? "claude.exe" : "claude"
+  const platform = `${process.platform}-${process.arch}`
+  const packages = process.platform === "linux" ? [platform, `${platform}-musl`] : [platform]
+  try {
+    const scope = dirname(realpathSync(SDK_LINK))
+    return packages.map((name) => join(scope, `claude-agent-sdk-${name}`, exe)).find((path) => existsSync(path))
+  } catch {
+    return undefined
   }
 }
 
@@ -158,18 +225,23 @@ function options(command: RunCommand, run: Run, emit: (event: AgentEvent) => voi
               resolve({ behavior: "deny", message: "The user declined this action." })
               return
             }
+            const updates: PermissionUpdate[] = []
             if (decision === "always" && always) {
               send({ type: "rules", runId: command.runId, rules: always.map(formatRule) })
-              resolve({
-                behavior: "allow",
-                updatedInput: input,
-                // Stop asking for the rest of this run; later runs get the
-                // saved rules through `allowedTools`.
-                updatedPermissions: [{ type: "addRules", rules: always, behavior: "allow", destination: "session" }],
-              })
-              return
+              // Stop asking for the rest of this run; later runs get the
+              // saved rules through `allowedTools`.
+              updates.push({ type: "addRules", rules: always, behavior: "allow", destination: "session" })
             }
-            resolve({ behavior: "allow", updatedInput: input })
+            if (toolName === "ExitPlanMode") {
+              // The plan is approved: build it under the chat's own permission policy.
+              const next = run.modes.leavePlan()
+              updates.push({
+                type: "setMode",
+                mode: permissionMode({ mode: next, permissions: run.policy }),
+                destination: "session",
+              })
+            }
+            resolve({ behavior: "allow", updatedInput: input, ...(updates.length > 0 && { updatedPermissions: updates }) })
           }
           run.permissions.set(requestId, settle)
           signal.addEventListener("abort", () => settle("deny"), { once: true })
@@ -192,23 +264,48 @@ function options(command: RunCommand, run: Run, emit: (event: AgentEvent) => voi
     systemPrompt: { type: "preset", preset: "claude_code" },
     permissionMode: permissionMode(command),
     allowDangerouslySkipPermissions: command.permissions === "bypass",
-    allowedTools: [...command.allowedTools, ...SAFE_TERMINAL_TOOLS],
-    mcpServers: { [TERMINAL_SERVER]: terminalServer((request) => callHost(command.runId, run, request)) },
+    allowedTools: [...command.allowedTools, ...SAFE_TERMINAL_TOOLS, ...SAFE_CONTEXT_TOOLS, ...SAFE_DEVICE_TOOLS],
+    mcpServers: {
+      [TERMINAL_SERVER]: terminalServer((request) => callTerminal(command.runId, run, request)),
+      [DESKTOP_SERVER]: desktopServer((request) => callDesktop(command.runId, run, request)),
+      [DEVICE_SERVER]: deviceServer((request) => callDevice(command.runId, run, request)),
+      [CONTEXTS_SERVER]: contextsServer((request) => callContexts(command.runId, run, request)),
+    },
     disallowedTools: disallowed,
     stderr: (data) => log(data),
     canUseTool,
+    pathToClaudeCodeExecutable: claudeExecutable(),
   }
 }
 
 /** Hands a `terminal-access` call to the host and waits for its answer. */
-function callHost(runId: string, run: Run, request: TerminalRequest): Promise<TerminalResult> {
+function callTerminal(runId: string, run: Run, request: TerminalRequest): Promise<TerminalResult> {
+  return callHost(run, (requestId) => send({ type: "terminal", runId, requestId, request }))
+}
+
+/** Hands a `desktop-control` call to the host and waits for its answer. */
+function callDesktop(runId: string, run: Run, request: DesktopRequest): Promise<DesktopResult> {
+  return callHost(run, (requestId) => send({ type: "desktop", runId, requestId, request }))
+}
+
+/** Hands a `device-control` call to the host and waits for its answer. */
+function callDevice(runId: string, run: Run, request: DeviceRequest): Promise<DesktopResult> {
+  return callHost(run, (requestId) => send({ type: "device", runId, requestId, request }))
+}
+
+/** Hands an `elaris-context` call to the host and waits for its answer. */
+function callContexts(runId: string, run: Run, request: ContextsRequest): Promise<ContextsResult> {
+  return callHost(run, (requestId) => send({ type: "contexts", runId, requestId, request }))
+}
+
+function callHost(run: Run, ask: (requestId: string) => void): Promise<DesktopResult> {
   const requestId = randomUUID()
   return new Promise((resolve) => {
-    run.terminals.set(requestId, (result) => {
-      run.terminals.delete(requestId)
+    run.hostCalls.set(requestId, (result) => {
+      run.hostCalls.delete(requestId)
       resolve(result)
     })
-    send({ type: "terminal", runId, requestId, request })
+    ask(requestId)
   })
 }
 
@@ -271,7 +368,7 @@ function readQuestions(input: Record<string, unknown>): Question[] {
   }))
 }
 
-function permissionMode({ mode, permissions }: RunCommand): PermissionMode {
+function permissionMode({ mode, permissions }: Pick<RunCommand, "mode" | "permissions">): PermissionMode {
   if (mode === "plan") return "plan"
   switch (permissions) {
     case "accept-edits":
@@ -286,20 +383,73 @@ function permissionMode({ mode, permissions }: RunCommand): PermissionMode {
 }
 
 /**
- * Turns the SDK's message stream into the transcript's events. Only the main
- * agent's output is shown; subagent activity appears as its Task tool call.
+ * The chat's mode as the agent is really running it. The agent can enter plan
+ * mode itself, and leaves it when the user approves the plan; each change is
+ * reported so the chat's mode follows.
+ */
+class ModeTracker {
+  /** Where an approved plan leads: the mode the chat was in before planning. */
+  private afterPlan: AgentMode
+
+  constructor(
+    public mode: AgentMode,
+    private emit: (event: AgentEvent) => void,
+  ) {
+    this.afterPlan = mode === "plan" ? "agent" : mode
+  }
+
+  /** The user picked `mode`; the chat already shows it. */
+  chose(mode: AgentMode) {
+    this.mode = mode
+    if (mode !== "plan") this.afterPlan = mode
+  }
+
+  enterPlan() {
+    this.set("plan")
+  }
+
+  /** Leaves plan mode, if in it, and returns the mode the agent is in now. */
+  leavePlan(): AgentMode {
+    if (this.mode === "plan") this.set(this.afterPlan)
+    return this.mode
+  }
+
+  /** The SDK reported the permission mode it runs in. */
+  reported(mode: PermissionMode) {
+    if (mode === "plan") this.enterPlan()
+    else this.leavePlan()
+  }
+
+  private set(mode: AgentMode) {
+    if (mode === this.mode) return
+    this.mode = mode
+    this.emit({ type: "mode", mode })
+  }
+}
+
+/**
+ * Turns the SDK's message stream into the transcript's events. The main
+ * agent's output streams as it's written; each subagent's comes a message at
+ * a time, wrapped in `subagent` events for its own tab.
  */
 class Translator {
   sessionSent = false
   ended = false
   private wroteText = false
   private needsBreak = false
+  /** Subagents seen starting, so other background tasks (shells, monitors) are left out. */
+  private subagents = new Set<string>()
+  /** Subagents that have written text, so the next text starts a new paragraph. */
+  private subagentsWithText = new Set<string>()
   /** Output tokens reported so far for the model call in progress, by agent (main or subagent). */
   private outputSeen = new Map<string, number>()
+  /** The main agent's tool calls by id, to tell which tool a result belongs to. */
+  private toolNames = new Map<string, string>()
 
   constructor(
     private emit: (event: AgentEvent) => void,
     private cwd: string,
+    private modes: ModeTracker,
   ) {}
 
   /**
@@ -312,10 +462,12 @@ class Translator {
       const u = event.message.usage
       const cacheRead = u.cache_read_input_tokens ?? 0
       const cacheWrite = u.cache_creation_input_tokens ?? 0
+      const input = u.input_tokens + cacheRead + cacheWrite
       this.outputSeen.set(key, u.output_tokens)
       this.emit({
         type: "usage",
-        usage: { input: u.input_tokens + cacheRead + cacheWrite, output: u.output_tokens, cacheRead, cacheWrite },
+        usage: { input, output: u.output_tokens, cacheRead, cacheWrite },
+        ...(agent === null && { context: input }),
       })
     } else if (event.type === "message_delta") {
       const output = event.usage.output_tokens
@@ -343,11 +495,19 @@ class Translator {
         }
         return
       }
+      case "system":
+        if ((message.subtype === "init" || message.subtype === "status") && message.permissionMode) {
+          this.modes.reported(message.permissionMode)
+        }
+        this.handleTask(message)
+        return
       case "assistant": {
+        if (message.agent_id) return this.handleSubagent(message.agent_id, message)
         if (message.parent_tool_use_id) return
         for (const block of message.message.content) {
           if (block.type === "tool_use") {
             const input = (block.input ?? {}) as Record<string, unknown>
+            this.toolNames.set(block.id, block.name)
             this.emit({
               type: "tool-start",
               id: block.id,
@@ -360,10 +520,12 @@ class Translator {
         return
       }
       case "user": {
+        if ("agent_id" in message && message.agent_id) return this.handleSubagent(message.agent_id, message)
         if (message.parent_tool_use_id || typeof message.message.content === "string") return
         for (const block of message.message.content) {
           if (block.type === "tool_result") {
             this.emit({ type: "tool-end", id: block.tool_use_id, ok: !block.is_error, output: toolOutput(block.content) })
+            if (!block.is_error) this.trackMode(this.toolNames.get(block.tool_use_id))
           }
         }
         return
@@ -378,6 +540,54 @@ class Translator {
           this.emit({ type: "error", message: detail || "The agent stopped with an error" })
         }
         return
+      }
+    }
+  }
+  /** The agent's own way in and out of plan mode. */
+  private trackMode(toolName: string | undefined) {
+    if (toolName === "EnterPlanMode") this.modes.enterPlan()
+    else if (toolName === "ExitPlanMode") this.modes.leavePlan()
+  }
+
+  /** Starts and ends of subagents, from the SDK's task events. */
+  private handleTask(message: Extract<SDKMessage, { type: "system" }>) {
+    if (message.subtype === "task_started") {
+      const isAgent = message.task_type ? message.task_type === "local_agent" : Boolean(message.subagent_type)
+      if (!isAgent) return
+      this.subagents.add(message.task_id)
+      this.emit({
+        type: "subagent-start",
+        agent: message.task_id,
+        toolId: message.tool_use_id ?? null,
+        description: message.description,
+      })
+    } else if (message.subtype === "task_notification" && this.subagents.has(message.task_id)) {
+      this.emit({ type: "subagent-end", agent: message.task_id, status: message.status })
+    }
+  }
+
+  /** A subagent's whole message: its text and tool calls, or its tool results. */
+  private handleSubagent(agent: string, message: Extract<SDKMessage, { type: "assistant" | "user" }>) {
+    const emit = (event: AgentEvent) => this.emit({ type: "subagent", agent, event })
+    const content = message.message.content
+    // A plain string is the prompt it was given, which its tab shows from the Agent call.
+    if (typeof content === "string") return
+    for (const block of content) {
+      if (block.type === "text" && message.type === "assistant" && block.text) {
+        const first = !this.subagentsWithText.has(agent)
+        this.subagentsWithText.add(agent)
+        emit({ type: "text-delta", delta: first ? block.text : `\n\n${block.text}` })
+      } else if (block.type === "tool_use") {
+        const input = (block.input ?? {}) as Record<string, unknown>
+        emit({
+          type: "tool-start",
+          id: block.id,
+          name: block.name,
+          summary: summarize(block.name, input, this.cwd),
+          input: clipInput(input),
+        })
+      } else if (block.type === "tool_result") {
+        emit({ type: "tool-end", id: block.tool_use_id, ok: !block.is_error, output: toolOutput(block.content) })
       }
     }
   }

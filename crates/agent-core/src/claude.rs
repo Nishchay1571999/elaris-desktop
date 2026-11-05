@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_protocol::{
-    AgentEvent, AgentMode, AgentRequest, Answers, PermissionDecision, PermissionPolicy, PromptImage, TokenUsage,
+    AgentEvent, AgentMode, AgentRequest, Answers, PermissionDecision, PermissionPolicy, PromptImage, SessionSettings,
+    TokenUsage,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -44,6 +45,13 @@ enum HostCommand<'a> {
     Interrupt {
         run_id: &'a str,
     },
+    /// The user changed the chat's mode, model or permissions mid-run.
+    Settings {
+        run_id: &'a str,
+        mode: AgentMode,
+        model: &'a str,
+        permissions: PermissionPolicy,
+    },
     Permission {
         run_id: &'a str,
         request_id: &'a str,
@@ -67,6 +75,37 @@ enum HostCommand<'a> {
         ok: bool,
         text: &'a str,
     },
+    /// Answers a `desktop` request: the text, and screenshot, the agent's tool call returns.
+    DesktopResult {
+        run_id: &'a str,
+        request_id: &'a str,
+        ok: bool,
+        text: &'a str,
+        image: Option<&'a ResultImage>,
+    },
+    /// Answers a `device` request: the text, and screenshot, the agent's tool call returns.
+    DeviceResult {
+        run_id: &'a str,
+        request_id: &'a str,
+        ok: bool,
+        text: &'a str,
+        image: Option<&'a ResultImage>,
+    },
+    /// Answers a `contexts` request: the text the agent's tool call returns.
+    ContextsResult {
+        run_id: &'a str,
+        request_id: &'a str,
+        ok: bool,
+        text: &'a str,
+    },
+}
+
+/// An image a tool call returns to the agent, base64-encoded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResultImage {
+    pub media_type: String,
+    pub data: String,
 }
 
 /// A call to the agent's `terminal-access` tool, which only Elaris provides:
@@ -98,6 +137,93 @@ pub enum TerminalRequest {
     List,
 }
 
+/// A call to the agent's `desktop-control` tool, which only Elaris provides:
+/// the host takes screenshots of the main display and moves the mouse and
+/// types for the agent. Coordinates are in screenshot pixels.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum DesktopRequest {
+    Screenshot,
+    Click {
+        x: i32,
+        y: i32,
+        #[serde(default)]
+        button: MouseButton,
+        /// 2 double-clicks, 3 triple-clicks.
+        #[serde(default)]
+        count: Option<u8>,
+    },
+    Move { x: i32, y: i32 },
+    Drag { from_x: i32, from_y: i32, to_x: i32, to_y: i32 },
+    Scroll {
+        x: i32,
+        y: i32,
+        direction: ScrollDirection,
+        /// Lines to scroll.
+        #[serde(default)]
+        amount: Option<u32>,
+    },
+    /// Types `text` into whatever has keyboard focus.
+    Type { text: String },
+    /// Presses a key combination such as `cmd+shift+t`.
+    Key { keys: String },
+    /// Opens an app by name or a URL.
+    Open { target: String },
+}
+
+/// A call to the agent's `elaris-context` tool, which only Elaris provides:
+/// the host reads the saved contexts (whole earlier sessions) the user
+/// referenced with `#ctx-…`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ContextsRequest {
+    List {
+        #[serde(default)]
+        query: Option<String>,
+    },
+    /// The context's prompts in order and the tools it used.
+    Overview { id: String },
+    /// A page of the context from entry `from_seq`, `offset` characters in.
+    Read {
+        id: String,
+        #[serde(default)]
+        from_seq: Option<u32>,
+        #[serde(default)]
+        offset: Option<usize>,
+        #[serde(default)]
+        max_chars: Option<usize>,
+    },
+    /// Entries containing `query`; every context when `id` is `None`.
+    Search {
+        #[serde(default)]
+        id: Option<String>,
+        query: String,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /// Entry `seq` exactly as the transcript recorded it.
+    Raw { id: String, seq: u32 },
+    Terminals { id: String },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MouseButton {
+    #[default]
+    Left,
+    Right,
+    Middle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScrollDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 enum Reply {
@@ -108,6 +234,9 @@ enum Reply {
     /// `None` when the session's transcript isn't on this machine.
     Usage { run_id: String, usage: Option<TokenUsage> },
     Terminal { run_id: String, request_id: String, request: TerminalRequest },
+    Desktop { run_id: String, request_id: String, request: DesktopRequest },
+    Contexts { run_id: String, request_id: String, request: ContextsRequest },
+    Device { run_id: String, request_id: String, request: serde_json::Value },
 }
 
 impl Reply {
@@ -118,7 +247,10 @@ impl Reply {
             | Self::Rules { run_id, .. }
             | Self::Done { run_id }
             | Self::Usage { run_id, .. }
-            | Self::Terminal { run_id, .. } => run_id,
+            | Self::Terminal { run_id, .. }
+            | Self::Desktop { run_id, .. }
+            | Self::Contexts { run_id, .. }
+            | Self::Device { run_id, .. } => run_id,
         }
     }
 }
@@ -132,6 +264,13 @@ pub enum Notice {
     AllowRules(Vec<String>),
     /// The agent used its terminal tool; answer with [`ClaudeAgent::answer_terminal`].
     Terminal { request_id: String, request: TerminalRequest },
+    /// The agent used its desktop tool; answer with [`ClaudeAgent::answer_desktop`].
+    Desktop { request_id: String, request: DesktopRequest },
+    /// The agent read a saved context; answer with [`ClaudeAgent::answer_contexts`].
+    Contexts { request_id: String, request: ContextsRequest },
+    /// The agent used its emulator and simulator tool; answer with [`ClaudeAgent::answer_device`].
+    /// The request is passed through as JSON: the `device-control` crate owns its shape.
+    Device { request_id: String, request: serde_json::Value },
 }
 
 type Routes = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Reply>>>>;
@@ -221,6 +360,15 @@ impl ClaudeAgent {
                 Some(Reply::Terminal { request_id, request, .. }) => {
                     on_notice(Notice::Terminal { request_id, request });
                 }
+                Some(Reply::Desktop { request_id, request, .. }) => {
+                    on_notice(Notice::Desktop { request_id, request });
+                }
+                Some(Reply::Contexts { request_id, request, .. }) => {
+                    on_notice(Notice::Contexts { request_id, request });
+                }
+                Some(Reply::Device { request_id, request, .. }) => {
+                    on_notice(Notice::Device { request_id, request });
+                }
                 Some(Reply::Done { .. }) => break,
                 Some(Reply::Usage { .. }) => {}
                 // The sidecar exited mid-run.
@@ -258,6 +406,18 @@ impl ClaudeAgent {
         }
     }
 
+    /// Hands the run in `run_id` the chat's new settings, so it switches now
+    /// rather than on the next message. A no-op when nothing runs there.
+    pub async fn update_settings(&self, run_id: &str, settings: &SessionSettings) -> Result<(), String> {
+        self.send(&HostCommand::Settings {
+            run_id,
+            mode: settings.mode,
+            model: &settings.model,
+            permissions: settings.permissions,
+        })
+        .await
+    }
+
     /// Answers a `permission-request` from the run in `run_id`.
     pub async fn answer_permission(
         &self,
@@ -281,6 +441,35 @@ impl ClaudeAgent {
     /// Answers a terminal request from the run in `run_id` with the text its tool call returns.
     pub async fn answer_terminal(&self, run_id: &str, request_id: &str, ok: bool, text: &str) -> Result<(), String> {
         self.send(&HostCommand::TerminalResult { run_id, request_id, ok, text }).await
+    }
+
+    /// Answers a desktop request from the run in `run_id`, with a screenshot if it took one.
+    pub async fn answer_desktop(
+        &self,
+        run_id: &str,
+        request_id: &str,
+        ok: bool,
+        text: &str,
+        image: Option<&ResultImage>,
+    ) -> Result<(), String> {
+        self.send(&HostCommand::DesktopResult { run_id, request_id, ok, text, image }).await
+    }
+
+    /// Answers a device request from the run in `run_id`, with a screenshot if it took one.
+    pub async fn answer_device(
+        &self,
+        run_id: &str,
+        request_id: &str,
+        ok: bool,
+        text: &str,
+        image: Option<&ResultImage>,
+    ) -> Result<(), String> {
+        self.send(&HostCommand::DeviceResult { run_id, request_id, ok, text, image }).await
+    }
+
+    /// Answers a saved-context request from the run in `run_id` with the text its tool call returns.
+    pub async fn answer_contexts(&self, run_id: &str, request_id: &str, ok: bool, text: &str) -> Result<(), String> {
+        self.send(&HostCommand::ContextsResult { run_id, request_id, ok, text }).await
     }
 
     async fn send(&self, command: &HostCommand<'_>) -> Result<(), String> {
@@ -468,6 +657,83 @@ mod tests {
                     request: TerminalRequest::Read { terminal_id: 3, wait_seconds: None },
                 },
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn forwards_contexts_requests() {
+        let agent = fake(
+            r#"read -r line
+            echo '{"type":"contexts","runId":"s1","requestId":"r1","request":{"action":"read","id":"ctx-abc123","fromSeq":4}}'
+            echo '{"type":"contexts","runId":"s1","requestId":"r2","request":{"action":"search","query":"adb"}}'
+            echo '{"type":"event","runId":"s1","event":{"type":"finish"}}'
+            echo '{"type":"done","runId":"s1"}'"#,
+        );
+        let mut notices = Vec::new();
+        agent.run(&request("go"), &CancellationToken::new(), |_| {}, |n| notices.push(n)).await;
+
+        assert_eq!(
+            notices,
+            [
+                Notice::Contexts {
+                    request_id: "r1".into(),
+                    request: ContextsRequest::Read { id: "ctx-abc123".into(), from_seq: Some(4), offset: None, max_chars: None },
+                },
+                Notice::Contexts {
+                    request_id: "r2".into(),
+                    request: ContextsRequest::Search { id: None, query: "adb".into(), limit: None },
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn forwards_desktop_requests() {
+        let agent = fake(
+            r#"read -r line
+            echo '{"type":"desktop","runId":"s1","requestId":"r1","request":{"action":"screenshot"}}'
+            echo '{"type":"desktop","runId":"s1","requestId":"r2","request":{"action":"click","x":10,"y":20,"count":2}}'
+            echo '{"type":"desktop","runId":"s1","requestId":"r3","request":{"action":"scroll","x":1,"y":2,"direction":"down"}}'
+            echo '{"type":"event","runId":"s1","event":{"type":"finish"}}'
+            echo '{"type":"done","runId":"s1"}'"#,
+        );
+        let mut notices = Vec::new();
+        agent.run(&request("go"), &CancellationToken::new(), |_| {}, |n| notices.push(n)).await;
+
+        let requests: Vec<_> = notices
+            .into_iter()
+            .map(|n| match n {
+                Notice::Desktop { request, .. } => request,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            requests,
+            [
+                DesktopRequest::Screenshot,
+                DesktopRequest::Click { x: 10, y: 20, button: MouseButton::Left, count: Some(2) },
+                DesktopRequest::Scroll { x: 1, y: 2, direction: ScrollDirection::Down, amount: None },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn forwards_device_requests_as_json() {
+        let agent = fake(
+            r#"read -r line
+            echo '{"type":"device","runId":"s1","requestId":"r1","request":{"action":"act","steps":[{"do":"tap","text":"Profile"}]}}'
+            echo '{"type":"event","runId":"s1","event":{"type":"finish"}}'
+            echo '{"type":"done","runId":"s1"}'"#,
+        );
+        let mut notices = Vec::new();
+        agent.run(&request("go"), &CancellationToken::new(), |_| {}, |n| notices.push(n)).await;
+
+        assert_eq!(
+            notices,
+            [Notice::Device {
+                request_id: "r1".into(),
+                request: serde_json::json!({ "action": "act", "steps": [{ "do": "tap", "text": "Profile" }] }),
+            }]
         );
     }
 

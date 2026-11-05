@@ -1,23 +1,29 @@
 import { useEffect, useRef } from "react"
 import { Group, Panel, type PanelImperativeHandle, Separator } from "react-resizable-panels"
 
+import { TabHeader } from "@/components/chat/chat-header"
 import { ChatView } from "@/components/chat/chat-view"
 import { InstructionsPage } from "@/components/customizations/instructions-page"
 import { McpPage } from "@/components/customizations/mcp-page"
 import { PlannedPage } from "@/components/customizations/planned-page"
 import { PluginsPage } from "@/components/customizations/plugins-page"
+import { ConnectGitHubDialog } from "@/components/github/connect-github"
+import { CommandPalette } from "@/components/palette/command-palette"
+import { CreatePrDialog } from "@/components/pulls/create-pr-dialog"
+import { TrackerPage } from "@/components/pulls/pulls-page"
 import { SkillsPage } from "@/components/customizations/skills-page"
 import { ToolsPage } from "@/components/customizations/tools-page"
+import { SettingsPage } from "@/components/settings/settings-page"
 import { Sidebar } from "@/components/sidebar/sidebar"
 import { Titlebar } from "@/components/titlebar/titlebar"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { DiffView } from "@/components/workspace/diff-view"
-import { FileView } from "@/components/workspace/file-view"
 import { OpeningBar } from "@/components/workspace/opening-bar"
 import { RightPanel } from "@/components/workspace/right-panel"
 import { useCtrlClipboard } from "@/hooks/use-ctrl-clipboard"
 import { useShortcuts } from "@/hooks/use-shortcuts"
 import { type AgentTerminal, ipc } from "@/lib/ipc"
+import { useGitHub } from "@/stores/github"
 import { useSessions } from "@/stores/sessions"
 import { type CustomizationId, useCurrent, useUi } from "@/stores/ui"
 import { useWorkspace } from "@/stores/workspace"
@@ -33,6 +39,21 @@ export function App() {
     // Shells a reloaded window left behind have no tab any more.
     void ipc.terminal.closeAll()
   }, [])
+
+  // GitHub follows the open folder and its branch: its repo, and the branch's pull request.
+  useEffect(() => {
+    void useGitHub.getState().refreshStatus().then(() => useGitHub.getState().refreshRepo())
+    return useWorkspace.subscribe((s, prev) => {
+      if (s.info?.root !== prev.info?.root) {
+        useGitHub.setState({ repo: undefined, branchPr: null })
+        void useGitHub.getState().refreshRepo()
+      } else if (s.info?.branch !== prev.info?.branch) {
+        void useGitHub.getState().refreshBranchPr()
+      }
+    })
+  }, [])
+
+  useChatFolder()
 
   // Terminals the agent starts open as tabs beside their chat, including ones
   // still running from before the window reloaded.
@@ -52,8 +73,32 @@ export function App() {
         <Panes />
         <ErrorToast />
       </div>
+      <CommandPalette />
+      <CreatePrDialog />
+      <ConnectGitHubDialog />
     </TooltipProvider>
   )
+}
+
+/**
+ * Each chat has one folder: opening a chat selects the folder it works in. A new
+ * chat keeps whatever folder is selected.
+ */
+function useChatFolder() {
+  const { sessionId } = useCurrent()
+  const folder = useSessions((s) =>
+    sessionId ? (s.sessions[sessionId]?.workspace ?? s.summaries.find((c) => c.id === sessionId)?.workspace) : null,
+  )
+  const switching = useRef<Promise<void>>(Promise.resolve())
+
+  useEffect(() => {
+    if (!folder) return
+    // One switch at a time, so quickly clicking through chats lands on the last one's folder.
+    switching.current = switching.current.then(async () => {
+      if (useWorkspace.getState().info?.root === folder) return
+      await useWorkspace.getState().open(folder, { keepNavigation: true })
+    })
+  }, [sessionId, folder])
 }
 
 function Panes() {
@@ -126,10 +171,21 @@ function MainView() {
       return <ChatView sessionId={sessionId} />
     case "diff":
       return <DiffView key={view.path} path={view.path} />
-    case "file":
-      return <FileView key={view.path} path={view.path} />
     case "planned":
       return <CustomizationView item={view.item} />
+    case "settings":
+      return <SettingsPage section={view.section} />
+    case "pulls":
+    case "issues":
+      // A tab beside the chat: the chat's tab bar stays over it.
+      return (
+        <div className="flex h-full min-h-0 min-w-0 flex-col">
+          <TabHeader sessionId={sessionId} />
+          <div className="min-h-0 flex-1">
+            <TrackerPage kind={view.kind === "pulls" ? "prs" : "issues"} repo={view.repo} number={view.number} />
+          </div>
+        </div>
+      )
   }
 }
 

@@ -1,81 +1,56 @@
-import { Check, Copy, SquareTerminal, X } from "lucide-react"
-import { useState } from "react"
+import { Bot, CircleDot, GitPullRequest, type LucideIcon, SquareTerminal, X } from "lucide-react"
 
 import type { Message } from "@/bindings/Message"
 import type { TokenUsage } from "@/bindings/TokenUsage"
 import { Tooltip } from "@/components/ui/tooltip"
+import { agentOfTab, agentThread, isAgentTab } from "@/lib/agents"
+import { ipc } from "@/lib/ipc"
 import { isTerminalTab, useTerminalTabs } from "@/lib/terminals"
+import { contextWindow } from "@/lib/models"
 import { cn } from "@/lib/utils"
+import { useContexts } from "@/stores/contexts"
 import { useSessions } from "@/stores/sessions"
-import { useToolTabs, useUi } from "@/stores/ui"
+import { isTrackerView, type TrackerTab, useCurrent, useToolTabs, useUi } from "@/stores/ui"
 
+import { STATUS_LABEL } from "./agent-view"
+import { SaveContextButton } from "./save-context-button"
 import { findPart, toolPath } from "./tool-view"
 
 /** Shared by the chat and both side columns so their headers line up. */
 export const HEADER = "flex h-11 shrink-0 items-center"
 
+const NO_MESSAGES: Message[] = []
+
+const TRACKER_TABS: Array<{ kind: TrackerTab; label: string; icon: LucideIcon }> = [
+  { kind: "pulls", label: "Pull requests", icon: GitPullRequest },
+  { kind: "issues", label: "Issues", icon: CircleDot },
+]
+
 /**
  * Editor-style tabs over the chat: the conversation ("Elaris") first, then any Write/Edit
- * calls opened from the side column and terminals opened with ⌘T / Ctrl+T. Shows the tokens used so far while the chat is in front.
+ * calls opened from the side column, terminals opened with ⌘T / Ctrl+T, and the Pull
+ * requests and Issues pages. Shows the tokens used so far while the chat is in front.
  */
 export function ChatHeader({
   sessionId,
-  title,
   messages,
   usage,
+  context,
+  model,
 }: {
   sessionId: string
-  title: string
   messages: Message[]
   usage: TokenUsage
+  /** Prompt tokens of the agent's latest model call; 0 until a reply reports it. */
+  context: number
+  model: string
 }) {
   const tabs = useToolTabs(sessionId)
-  const select = useUi((s) => s.selectToolTab)
-  const close = useUi((s) => s.closeToolTab)
-  const terminals = useTerminalTabs()
 
   return (
     <header className={cn(HEADER, "gap-4 px-3")}>
-      <div role="tablist" aria-label="Open tabs" className="scrollbar-hidden flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
-        <Tab active={tabs.active === null} onSelect={() => select(sessionId, null)}>
-          <span className="font-medium">Elaris</span>
-        </Tab>
-        <CopyConversation title={title} messages={messages} />
-        {tabs.open.map((id) => {
-          if (isTerminalTab(id)) {
-            const terminal = terminals[id]
-            const title = terminal?.title ?? "Terminal"
-            return (
-              <Tab
-                key={id}
-                active={tabs.active === id}
-                title={terminal?.agent ? `${title} · started by Elaris` : title}
-                onSelect={() => select(sessionId, id)}
-                onClose={() => close(sessionId, id)}
-              >
-                <SquareTerminal className={cn("mr-1.5 size-3.5 shrink-0", terminal?.agent && "text-brand")} />
-                <span className="max-w-40 truncate">{title}</span>
-                {terminal?.agent && terminal.running && (
-                  <span aria-label="Running" className="ml-1.5 size-1.5 shrink-0 animate-pulse rounded-full bg-brand" />
-                )}
-              </Tab>
-            )
-          }
-          const part = findPart(messages, id)
-          const path = part ? toolPath(part) : "Unavailable"
-          return (
-            <Tab
-              key={id}
-              active={tabs.active === id}
-              title={path}
-              onSelect={() => select(sessionId, id)}
-              onClose={() => close(sessionId, id)}
-            >
-              <span className="max-w-40 truncate">{path.split("/").pop()}</span>
-            </Tab>
-          )
-        })}
-      </div>
+      <TabStrip sessionId={sessionId} messages={messages} />
+      {tabs.active === null && context > 0 && <ContextMeter used={context} limit={contextWindow(model)} />}
       {tabs.active === null && (
         <Tooltip
           label={
@@ -99,6 +74,113 @@ export function ChatHeader({
         </Tooltip>
       )}
     </header>
+  )
+}
+
+/** The tab bar alone: over the Pull requests and Issues tabs, and the new-chat screen. */
+export function TabHeader({ sessionId }: { sessionId: string | null }) {
+  const messages = useSessions((s) => (sessionId ? s.sessions[sessionId]?.messages : undefined)) ?? NO_MESSAGES
+  return (
+    <header className={cn(HEADER, "gap-4 px-3")}>
+      <TabStrip sessionId={sessionId} messages={messages} />
+    </header>
+  )
+}
+
+function TabStrip({ sessionId, messages }: { sessionId: string | null; messages: Message[] }) {
+  const tabs = useToolTabs(sessionId ?? "")
+  const trackerTabs = useUi((s) => s.trackerTabs)
+  const close = useUi((s) => s.closeToolTab)
+  const { view } = useCurrent()
+  const terminals = useTerminalTabs()
+  // While a Pull requests or Issues tab is in front, none of the chat's tabs is.
+  const tracker = isTrackerView(view) ? view.kind : null
+
+  const select = (id: string | null) => {
+    if (sessionId) useUi.getState().selectToolTab(sessionId, id)
+    if (tracker) useUi.getState().navigate({ view: { kind: "chat" } })
+  }
+  const active = (id: string | null) => !tracker && tabs.active === id
+
+  return (
+    <div role="tablist" aria-label="Open tabs" className="scrollbar-hidden flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
+      <Tab active={active(null)} onSelect={() => select(null)}>
+        <span className="font-medium">Elaris</span>
+      </Tab>
+      {sessionId && <SaveContext sessionId={sessionId} empty={messages.length === 0} />}
+      {sessionId &&
+        tabs.open.map((id) => {
+          if (isTerminalTab(id)) {
+            const terminal = terminals[id]
+            const title = terminal?.title ?? "Terminal"
+            return (
+              <Tab
+                key={id}
+                active={active(id)}
+                title={terminal?.agent ? `${title} · started by Elaris` : title}
+                onSelect={() => select(id)}
+                onClose={() => close(sessionId, id)}
+              >
+                <SquareTerminal className={cn("mr-1.5 size-3.5 shrink-0", terminal?.agent && "text-brand")} />
+                <span className="max-w-40 truncate">{title}</span>
+                {terminal?.agent && terminal.running && (
+                  <span aria-label="Running" className="ml-1.5 size-1.5 shrink-0 animate-pulse rounded-full bg-brand" />
+                )}
+              </Tab>
+            )
+          }
+          if (isAgentTab(id)) {
+            const thread = agentThread(messages, agentOfTab(id))
+            const title = thread?.description || "Agent"
+            return (
+              <Tab
+                key={id}
+                active={active(id)}
+                title={`${title} · ${thread ? STATUS_LABEL[thread.status] : "Starting"}`}
+                onSelect={() => select(id)}
+                onClose={() => close(sessionId, id)}
+              >
+                <Bot className="mr-1.5 size-3.5 shrink-0 text-brand" />
+                <span className="max-w-40 truncate">{title}</span>
+                {thread?.status === "running" && (
+                  <span aria-label="Running" className="ml-1.5 size-1.5 shrink-0 animate-pulse rounded-full bg-brand" />
+                )}
+              </Tab>
+            )
+          }
+          const part = findPart(messages, id)
+          const path = part ? toolPath(part) : "Unavailable"
+          return (
+            <Tab
+              key={id}
+              active={active(id)}
+              title={path}
+              onSelect={() => select(id)}
+              onClose={() => close(sessionId, id)}
+            >
+              <span className="max-w-40 truncate">{path.split("/").pop()}</span>
+            </Tab>
+          )
+        })}
+      {TRACKER_TABS.map(({ kind, label, icon: Icon }) => {
+        const at = trackerTabs[kind]
+        if (!at) return null
+        const place = at.number === undefined ? null : `${at.repo ?? ""}#${at.number}`
+        return (
+          <Tab
+            key={kind}
+            active={tracker === kind}
+            title={place ? `${label} · ${place}` : label}
+            onSelect={() => useUi.getState().navigate({ view: { kind, ...at } })}
+            onClose={() => useUi.getState().closeTracker(kind)}
+          >
+            <Icon className="mr-1.5 size-3.5 shrink-0" />
+            <span className="shrink-0">{label}</span>
+            {at.number !== undefined && <span className="ml-1.5 text-subtle-foreground tabular-nums">#{at.number}</span>}
+          </Tab>
+        )
+      })}
+    </div>
   )
 }
 
@@ -151,46 +233,68 @@ function Tab({
   )
 }
 
-/** Copies the conversation as a Markdown README: the messages only, no tool calls. Nothing is saved. */
-function CopyConversation({ title, messages }: { title: string; messages: Message[] }) {
-  const [copied, setCopied] = useState(false)
-
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(conversationMarkdown(title, messages))
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    } catch {
-      useSessions.setState({ error: "Couldn't copy the conversation" })
-    }
-  }
-
+/**
+ * Saves the chat in Elaris, whole (every tool call, command and output, plus its terminals),
+ * and copies its id. Typing `#` in any chat lists saved chats to hand the agent as context.
+ */
+function SaveContext({ sessionId, empty }: { sessionId: string; empty: boolean }) {
+  const streaming = useSessions((s) => Boolean(s.streaming[sessionId]))
+  const save = useContexts((s) => s.save)
   return (
-    <Tooltip label={copied ? "Copied" : "Copy conversation as README"}>
-      <button
-        type="button"
-        onClick={() => void copy()}
-        aria-label="Copy conversation as README"
-        className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
-      >
-        {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-      </button>
-    </Tooltip>
+    <SaveContextButton
+      sigil="#"
+      noun="chat"
+      disabled={streaming || empty}
+      disabledLabel={streaming ? "Save once the reply finishes" : undefined}
+      save={() => save(sessionId)}
+      exportMarkdown={(id) => ipc.contexts.export(id)}
+    />
   )
 }
 
-function conversationMarkdown(title: string, messages: Message[]): string {
-  const sections = messages.flatMap((message) => {
-    const text =
-      message.role === "user"
-        ? message.content
-        : message.parts.length > 0
-          ? message.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])).join("\n\n")
-          : message.content
-    if (!text.trim()) return []
-    return [`## ${message.role === "user" ? "You" : "Elaris"}\n\n${text.trim()}`]
-  })
-  return `# ${title || "Conversation"}\n\n${sections.join("\n\n---\n\n")}\n`
+/** How full the agent's context window is, as a small ring. */
+function ContextMeter({ used, limit }: { used: number; limit: number }) {
+  const share = Math.min(1, used / limit)
+  const percent = Math.round(share * 100)
+  const r = 6
+  const circumference = 2 * Math.PI * r
+  const tone = share >= 0.9 ? "text-destructive" : share >= 0.7 ? "text-git-modified" : "text-brand"
+
+  return (
+    <Tooltip
+      label={
+        <span className="block tabular-nums">
+          Context window {percent}% full
+          <br />
+          {used.toLocaleString()} of {limit.toLocaleString()} tokens
+          {share >= 0.7 && (
+            <>
+              <br />
+              <span className="text-muted-foreground">Older turns get summarised when it fills up.</span>
+            </>
+          )}
+        </span>
+      }
+    >
+      <p aria-label={`Context window ${percent}% full`} className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground tabular-nums">
+        <svg viewBox="0 0 16 16" className="size-3.5 -rotate-90">
+          <circle cx="8" cy="8" r={r} fill="none" strokeWidth="2" className="stroke-border-strong" />
+          <circle
+            cx="8"
+            cy="8"
+            r={r}
+            fill="none"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeDasharray={circumference}
+            strokeDashoffset={circumference * (1 - share)}
+            className={cn("stroke-current transition-[stroke-dashoffset]", tone)}
+          />
+        </svg>
+        {percent}%
+      </p>
+    </Tooltip>
+  )
 }
 
 function compact(n: number): string {

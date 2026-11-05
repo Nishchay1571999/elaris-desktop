@@ -1,48 +1,70 @@
-import { Check, ChevronRight, LoaderCircle, Maximize2, X } from "lucide-react"
-import { useState } from "react"
+import { ChevronRight, Maximize2, X } from "lucide-react"
+import { type KeyboardEvent, useState } from "react"
 
 import { cn } from "@/lib/utils"
 
-import { type ToolPart, toolLabel } from "./activity"
+import { type ToolPart, toolAction, toolEntryLabel } from "./activity"
 import { ToolDetail } from "./tool-detail"
+import { ToolIcon, WorkLogDetails, WorkLogRow } from "./work-log"
 
-/** One tool call; click to see what it did, inline or (with `onOpen`) full page. */
+/**
+ * One tool call as a work-log line: its icon, the command or file, a chevron.
+ * Click to see what it did, inline or (with `onOpen`) full page.
+ */
 export function ToolRow({ part, onOpen }: { part: ToolPart; onOpen?: () => void }) {
   const failed = part.status === "failed"
+  const running = part.status === "running"
   const [open, setOpen] = useState(false)
   const hasDetail = Object.keys(part.input ?? {}).length > 0 || !!part.output
+  const label = toolEntryLabel(part)
+  const toggle = () => (onOpen ? onOpen() : setOpen((o) => !o))
 
   return (
-    <div className="rounded-lg border border-border bg-surface-sunken text-xs">
-      <button
-        type="button"
-        aria-expanded={onOpen ? undefined : open}
-        disabled={!hasDetail}
-        onClick={() => (onOpen ? onOpen() : setOpen((o) => !o))}
-        className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-1.5 text-left outline-none enabled:hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
-      >
-        {part.status === "running" ? (
-          <LoaderCircle aria-label="Running" className="size-3.5 shrink-0 animate-spin text-brand" />
-        ) : part.status === "done" ? (
-          <Check aria-label="Done" className="size-3.5 shrink-0 text-git-added" />
-        ) : (
-          <X aria-label="Failed" className="size-3.5 shrink-0 text-destructive" />
-        )}
-        <span className="shrink-0 font-medium">{toolLabel(part.name)}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-muted-foreground" title={part.summary}>
-          {part.summary}
-        </span>
-        {hasDetail && onOpen ? (
-          <Maximize2 aria-label="Open full page" className="size-3 shrink-0 text-subtle-foreground" />
-        ) : hasDetail && (
-          <ChevronRight className={cn("size-3.5 shrink-0 text-subtle-foreground transition-transform", open && "rotate-90")} />
-        )}
-      </button>
+    <WorkLogRow
+      {...(hasDetail && {
+        role: "button",
+        tabIndex: 0,
+        "aria-label": failed ? `${label}, tool call failed` : label,
+        "aria-expanded": onOpen ? undefined : open,
+        onClick: toggle,
+        onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => {
+          if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+            e.preventDefault()
+            toggle()
+          }
+        },
+      })}
+      title={part.summary || undefined}
+      icon={
+        <ToolIcon
+          action={toolAction(part)}
+          className={cn("size-4 shrink-0 stroke-2", failed ? "text-destructive/60" : "text-subtle-foreground")}
+        />
+      }
+      label={<span className={cn("block truncate", running && "live-tool-shine")}>{label}</span>}
+      trailing={
+        <>
+          {failed && <X aria-hidden className="size-3 shrink-0 text-destructive/60" />}
+          <span className={cn("flex size-4 shrink-0 items-center justify-center", !hasDetail && "invisible")} aria-hidden>
+            {onOpen ? (
+              <Maximize2 className="size-3 text-subtle-foreground opacity-0 transition-opacity group-hover/timeline-row:opacity-100" />
+            ) : (
+              <ChevronRight
+                className={cn(
+                  "size-3 text-subtle-foreground opacity-70 transition-transform duration-200",
+                  open && "rotate-90",
+                )}
+              />
+            )}
+          </span>
+        </>
+      }
+    >
       {open && !onOpen && (
-        <div className="flex flex-col gap-2 border-t border-border p-2">
+        <WorkLogDetails>
           <ToolDetail name={part.name} input={part.input} output={part.output} failed={failed} />
-        </div>
+        </WorkLogDetails>
       )}
-    </div>
+    </WorkLogRow>
   )
 }

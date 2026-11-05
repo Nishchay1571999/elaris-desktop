@@ -17,14 +17,18 @@ tauri-build = { version = "2", features = [] }
 agent-core.workspace = true
 agent-protocol.workspace = true
 code-intelligence.workspace = true
+contexts.workspace = true
 customizations.workspace = true
+desktop-control.workspace = true
+device-control.workspace = true
 terminal.workspace = true
 workspace.workspace = true
 
 base64 = "0.22"
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2", features = [] }
+sha2 = "0.10"
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 thiserror.workspace = true
 tokio.workspace = true

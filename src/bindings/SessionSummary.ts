@@ -3,4 +3,8 @@
 /**
  * What the sidebar needs, without loading every transcript.
  */
-export type SessionSummary = { id: string, title: string, updatedAt: number, workspace: string | null, };
+export type SessionSummary = { id: string, title: string, updatedAt: number, workspace: string | null, 
+/**
+ * The start of the chat's first message, on one line.
+ */
+preview: string, };

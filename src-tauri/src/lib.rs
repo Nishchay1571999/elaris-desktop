@@ -2,15 +2,21 @@
 //! commands in [`commands`]; all file, git, persistence and agent work happens
 //! here, off the UI thread.
 
+mod agent_contexts;
+mod agent_desktop;
+mod agent_device;
 mod agent_terminal;
 mod commands;
 mod error;
+mod gh_snapshot;
+mod shell;
 mod sidecar;
 mod state;
 mod store;
 
 use agent_core::ClaudeAgent;
 use code_intelligence::CodeIntelligence;
+use contexts::ContextStore;
 use tauri::Manager;
 
 use crate::state::AppState;
@@ -23,8 +29,9 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             let store = Store::open(&data_dir)?;
             let claude = ClaudeAgent::new(sidecar::command(app.handle()));
+            let contexts = ContextStore::open(&data_dir.join("elaris.db"))?;
             let code = CodeIntelligence::new(data_dir.join("code-intelligence"));
-            app.manage(AppState::new(store, claude, code));
+            app.manage(AppState::new(store, claude, contexts, code));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -33,8 +40,42 @@ pub fn run() {
             commands::workspace::workspace_recent,
             commands::workspace::workspace_list_dir,
             commands::workspace::workspace_read_file,
+            commands::workspace::workspace_logo,
+            commands::workspace::read_image_data_url,
             commands::git::git_status,
             commands::git::git_diff,
+            commands::git::git_branches,
+            commands::git::git_switch,
+            commands::git::git_create_branch,
+            commands::git::git_commit,
+            commands::git::git_push,
+            commands::git::git_log_range,
+            commands::github::gh_status,
+            commands::github::gh_install,
+            commands::github::gh_login,
+            commands::github::gh_login_cancel,
+            commands::github::gh_logout,
+            commands::github::gh_repo,
+            commands::github::gh_pr_list,
+            commands::github::gh_pr_view,
+            commands::github::gh_pr_diff,
+            commands::github::gh_pr_for_branch,
+            commands::github::gh_pr_comment,
+            commands::github::gh_pr_review,
+            commands::github::gh_pr_merge,
+            commands::github::gh_pr_set_state,
+            commands::github::gh_pr_checkout,
+            commands::github::gh_pr_create,
+            commands::github::gh_search,
+            commands::github::gh_repos,
+            commands::github::gh_labels,
+            commands::github::gh_issue_view,
+            commands::github::gh_issue_comment,
+            commands::github::gh_issue_set_state,
+            commands::github::gh_asset,
+            commands::github::gh_save_item,
+            commands::github::gh_asset_open,
+            commands::github::open_url,
             commands::code::code_highlights,
             commands::code::code_install_server,
             commands::sessions::sessions_list,
@@ -45,6 +86,7 @@ pub fn run() {
             commands::sessions::sessions_update_settings,
             commands::sessions::sessions_delete,
             commands::chat::chat_send,
+            commands::chat::chat_send_agent,
             commands::chat::chat_image,
             commands::chat::chat_attach,
             commands::chat::chat_running,
@@ -53,6 +95,15 @@ pub fn run() {
             commands::chat::chat_answer,
             commands::chat::permissions_list,
             commands::chat::permissions_forget,
+            commands::contexts::contexts_save,
+            commands::contexts::contexts_list,
+            commands::contexts::contexts_get,
+            commands::contexts::contexts_rename,
+            commands::contexts::contexts_delete,
+            commands::contexts::contexts_export,
+            commands::contexts::items_list,
+            commands::contexts::items_delete,
+            commands::contexts::items_export,
             commands::customizations::skills_installed,
             commands::customizations::skills_search,
             commands::customizations::skills_add,

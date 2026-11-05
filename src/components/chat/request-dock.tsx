@@ -12,7 +12,7 @@ import { cn } from "@/lib/utils";
 import { type PendingRequest, useSessions } from "@/stores/sessions";
 import { useUi } from "@/stores/ui";
 
-import { toolLabel } from "./activity";
+import { PLAN_TOOL, toolLabel } from "./activity";
 import { ToolDetail } from "./tool-detail";
 
 /** The one filled action in the dock; greys out like the composer's send button until it can act. */
@@ -45,9 +45,9 @@ export const RequestDock = forwardRef<
       aria-label={
         request.type === "question"
           ? "Elaris has a question"
-          : `Allow ${toolLabel(request.toolName)}?`
+          : permissionTitle(request.toolName)
       }
-      className="flex max-h-[min(55vh,32rem)] animate-dock-in flex-col rounded-t-xl border border-b-0 border-input bg-surface-elevated"
+      className="flex max-h-[min(55vh,32rem)] animate-dock-in flex-col rounded-t-2xl border border-b-0 border-input bg-surface-elevated"
     >
       {request.type === "question" ? (
         <QuestionPanel
@@ -464,6 +464,12 @@ function WaitingCount({ waiting }: { waiting: number }) {
 /* Permission prompts                                                         */
 /* -------------------------------------------------------------------------- */
 
+function permissionTitle(toolName: string): string {
+  return toolName === PLAN_TOOL
+    ? "Approve this plan?"
+    : `Allow ${toolLabel(toolName)}?`;
+}
+
 function PermissionPanel({
   sessionId,
   request,
@@ -477,6 +483,9 @@ function PermissionPanel({
   const [sending, setSending] = useState(false);
   const allowButton = useRef<HTMLButtonElement>(null);
   const rules = request.always?.join(", ");
+  // A finished plan asks to leave plan mode and start building.
+  const plan = request.toolName === PLAN_TOOL;
+  const title = permissionTitle(request.toolName);
 
   useEffect(() => allowButton.current?.focus({ preventScroll: true }), []);
 
@@ -491,7 +500,7 @@ function PermissionPanel({
   return (
     <div
       role="alertdialog"
-      aria-label={`Allow ${toolLabel(request.toolName)}?`}
+      aria-label={title}
       onKeyDown={(e) => {
         if (e.key !== "Escape") return;
         e.preventDefault();
@@ -501,9 +510,7 @@ function PermissionPanel({
     >
       <div className="flex shrink-0 items-center gap-2 px-4 pt-3.5 pb-2">
         <ShieldQuestion className="size-4 shrink-0 text-muted-foreground" />
-        <h2 className="shrink-0 text-sm font-medium">
-          Allow {toolLabel(request.toolName)}?
-        </h2>
+        <h2 className="shrink-0 text-sm font-medium">{title}</h2>
         {request.summary && (
           <code
             className="selectable min-w-0 truncate font-mono text-xs text-muted-foreground"
@@ -519,7 +526,7 @@ function PermissionPanel({
       </div>
       <div className="flex shrink-0 items-center gap-2 px-4 pt-2 pb-3">
         <p className="min-w-0 flex-1 truncate text-[11.5px] text-subtle-foreground">
-          ↵ allow · esc deny
+          {plan ? "↵ approve · esc keep planning" : "↵ allow · esc deny"}
         </p>
         <button
           type="button"
@@ -527,7 +534,7 @@ function PermissionPanel({
           onClick={() => decide("deny")}
           className="h-7 rounded-md px-2.5 text-xs font-medium text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
         >
-          Deny
+          {plan ? "Keep planning" : "Deny"}
         </button>
         {rules && (
           <button
@@ -550,7 +557,7 @@ function PermissionPanel({
           onClick={() => decide("allow")}
           className={PRIMARY}
         >
-          Allow
+          {plan ? "Approve plan" : "Allow"}
         </button>
       </div>
     </div>

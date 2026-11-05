@@ -12,4 +12,8 @@ root: string, isGit: boolean,
 /**
  * Current branch, or `None` for a detached HEAD or a non-git folder.
  */
-branch: string | null, };
+branch: string | null, 
+/**
+ * The branch pull requests target, when one can be found.
+ */
+defaultBranch: string | null, };

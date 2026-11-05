@@ -27,6 +27,14 @@ Rust does the work: `crates/workspace` lists files (honouring `.gitignore`), wat
 
 **The agent is the Claude Agent SDK.** It only exists for TypeScript and Python, so it runs in a small Node sidecar (`sidecar/`) that `crates/agent-core` starts and talks to over stdio (one JSON message per line). The agent works in the open folder with Claude Code's tools, streams text and tool calls into the chat (expand a call to see its diff, command output or file contents), asks before edits and commands (approve once, *Always allow* for the folder, or pick *Accept edits*, *Auto* or *Bypass* under the composer), asks you multiple-choice questions when it needs a decision, and resumes its own session on follow-up messages. Choose Claude Opus 5.5 (default), Sonnet 5.5 or Haiku 5.5, or the offline *Mock agent*.
 
+**Emulators and simulators.** The agent's `device-control` tool (`crates/device-control`) drives Android emulators through `adb` and iOS simulators through `xcrun simctl` and [AXe](https://github.com/cameroncooke/AXe) (`brew install cameroncooke/axe/axe`). The tool is built to use few tokens:
+- It reads the screen as a short numbered list of elements rather than a screenshot.
+- It runs batches of taps, typing, scrolls and waits in one call, targeting elements by number or text.
+- It returns only the app's own log, filtered and with repeats collapsed.
+- It reads app files and runs SQL on copies of app databases.
+
+Reading is allowed by default; acting, booting and managing apps ask first. You can change this under **Tools**.
+
 - **Auth:** the SDK uses `ANTHROPIC_API_KEY` if set, otherwise your Claude Code login.
 - **Node:** needs Node ≥ 18 on the machine. Set `ELARIS_NODE` if it isn't found, and `ELARIS_SIDECAR` to point at a different `main.js`.
 - **Packaging:** release bundles don't ship Node or the sidecar yet. `pnpm desktop:app` builds a copy that loads the sidecar from this repo (`sidecar/dist/main.js`), so it only runs on the machine that built it, and rebuilding the sidecar changes it the next time the sidecar restarts.
@@ -46,6 +54,7 @@ elaris-desktop/
 │   ├── agent-core/         # Claude agent (sidecar client) + offline mock
 │   ├── code-intelligence/  # Language servers (via Neovim/Mason) for semantic tokens
 │   ├── customizations/     # Skills, MCP servers, tool permissions, CLAUDE.md
+│   ├── device-control/     # Android emulators and iOS simulators for the agent
 │   ├── terminal/           # Pseudo-terminals for shells and agent commands
 │   └── workspace/          # File tree, git status/diff, file watching
 ├── src/                # UI: components, Zustand stores, lib/ipc.ts, bindings/

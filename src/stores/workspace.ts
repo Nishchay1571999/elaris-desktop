@@ -1,18 +1,13 @@
 import { create } from "zustand"
 
 import type { ChangedFile } from "@/bindings/ChangedFile"
-import type { FileEntry } from "@/bindings/FileEntry"
 import type { WorkspaceInfo } from "@/bindings/WorkspaceInfo"
 import { errorMessage, ipc } from "@/lib/ipc"
-import { parentDir } from "@/lib/utils"
 import { useUi } from "@/stores/ui"
 
 interface WorkspaceState {
   info: WorkspaceInfo | null
   recent: string[]
-  /** Listed folders, keyed by workspace-relative path (`""` is the root). */
-  children: Record<string, FileEntry[]>
-  expanded: Record<string, true>
   changes: ChangedFile[]
   error: string | null
   /** How far along opening a project is, 0–1, or `null` when not opening one. */
@@ -20,49 +15,33 @@ interface WorkspaceState {
 
   /** Reopens the last workspace and starts listening for file changes. */
   init: () => Promise<void>
-  open: (path: string) => Promise<void>
+  /**
+   * Opens `path`. Switching to a chat's own folder passes `keepNavigation`, so
+   * history and the terminals of other chats survive the switch.
+   */
+  open: (path: string, options?: { keepNavigation?: boolean }) => Promise<void>
   pickAndOpen: () => Promise<void>
-  toggleDir: (path: string) => Promise<void>
   refreshChanges: () => Promise<void>
+  switchBranch: (name: string) => Promise<void>
+  /** Re-reads the branch and git status, after git or gh changed them. */
+  refreshInfo: () => Promise<void>
 }
 
 let unlisten: (() => void) | null = null
 
 export const useWorkspace = create<WorkspaceState>()((set, get) => {
-  const listDir = async (path: string) => {
-    try {
-      const entries = await ipc.workspace.listDir(path)
-      set((s) => ({ children: { ...s.children, [path]: entries } }))
-    } catch {
-      // The folder was deleted; forget it so it's re-listed if it returns.
-      set((s) => {
-        const children = { ...s.children }
-        const expanded = { ...s.expanded }
-        delete children[path]
-        delete expanded[path]
-        return { children, expanded }
-      })
-    }
-  }
-
-  /** Re-lists only the folders we've shown that contain a changed path. */
   const onChanged = async (paths: string[]) => {
-    const touchesGit = paths.some((p) => p.startsWith(".git/"))
-    const dirs = new Set(paths.filter((p) => !p.startsWith(".git/")).map(parentDir))
-    if (touchesGit) {
+    if (paths.some((p) => p.startsWith(".git/"))) {
       // Branch switches, commits, or a fresh `git init`.
       const info = await ipc.workspace.current()
       if (info) set({ info })
     }
-    const loaded = get().children
-    await Promise.all([...[...dirs].filter((dir) => dir in loaded).map(listDir), get().refreshChanges()])
+    await get().refreshChanges()
   }
 
   return {
     info: null,
     recent: [],
-    children: {},
-    expanded: {},
     changes: [],
     error: null,
     opening: null,
@@ -73,25 +52,27 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => {
       set({ recent })
       if (current) {
         set({ info: current })
-        await Promise.all([listDir(""), get().refreshChanges()])
+        await get().refreshChanges()
       } else if (recent[0]) {
         await get().open(recent[0])
       }
     },
 
-    open: async (path) => {
-      // Four steps: open the folder, list its root, read git status, refresh
-      // the recent list. Each one done moves the bar a quarter along.
+    open: async (path, options) => {
+      // Three steps: open the folder, read git status, refresh the recent
+      // list. Each one done moves the bar a third along.
       let done = 0
-      const step = () => set({ opening: ++done / 4 })
+      const step = () => set({ opening: ++done / 3 })
       set({ opening: 0 })
       try {
         const info = await ipc.workspace.open(path)
         step()
-        // The open chat, file and diff views all belong to the previous project.
-        if (info.root !== get().info?.root) useUi.getState().resetNavigation()
-        set({ info, children: {}, expanded: {}, changes: [], error: null })
-        await Promise.all([listDir("").then(step), get().refreshChanges().then(step)])
+        // File and diff views belong to the previous project; the open chat
+        // stays, and its next message runs in this one.
+        if (info.root !== get().info?.root && !options?.keepNavigation) useUi.getState().resetNavigation()
+        set({ info, changes: [], error: null })
+        await get().refreshChanges()
+        step()
         set({ recent: await ipc.workspace.recent() })
       } catch (error) {
         set({ error: errorMessage(error) })
@@ -105,18 +86,6 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => {
       if (path) await get().open(path)
     },
 
-    toggleDir: async (path) => {
-      const expanded = { ...get().expanded }
-      if (expanded[path]) {
-        delete expanded[path]
-        set({ expanded })
-        return
-      }
-      expanded[path] = true
-      set({ expanded })
-      if (!(path in get().children)) await listDir(path)
-    },
-
     refreshChanges: async () => {
       if (!get().info?.isGit) {
         set({ changes: [] })
@@ -127,6 +96,26 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => {
       } catch (error) {
         set({ error: errorMessage(error) })
       }
+    },
+
+    refreshInfo: async () => {
+      const info = await ipc.workspace.current()
+      if (info) set({ info })
+      await get().refreshChanges()
+    },
+
+    switchBranch: async (name) => {
+      let error: string | null = null
+      try {
+        await ipc.git.switch(name)
+      } catch (e) {
+        error = errorMessage(e)
+      }
+      // The watcher re-lists changed folders; the branch name is ours to refresh.
+      // Even a failed switch can land on the branch, with conflicts to resolve.
+      const info = await ipc.workspace.current()
+      set(info ? { info, error } : { error })
+      await get().refreshChanges()
     },
   }
 })

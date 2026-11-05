@@ -13,6 +13,8 @@ pub enum CommandError {
     Code(#[from] code_intelligence::Error),
     #[error(transparent)]
     Terminal(#[from] terminal::Error),
+    #[error(transparent)]
+    Contexts(#[from] contexts::Error),
     #[error("No folder is open")]
     NoWorkspace,
     #[error("A reply is already in progress in this chat")]
@@ -21,8 +23,31 @@ pub enum CommandError {
     Image(String),
     #[error("{0}")]
     Agent(String),
+    #[error("{0}")]
+    Git(String),
+    /// A `gh` failure. Sent as `gh:<kind>: message` so the UI can offer to
+    /// install gh or sign in instead of only showing the error.
+    #[error("gh:{kind}: {message}")]
+    GitHub { kind: GitHubErrorKind, message: String },
     #[error("Background task failed: {0}")]
     Task(String),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum GitHubErrorKind {
+    NotInstalled,
+    NotSignedIn,
+    Other,
+}
+
+impl std::fmt::Display for GitHubErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotInstalled => "not-installed",
+            Self::NotSignedIn => "not-signed-in",
+            Self::Other => "other",
+        })
+    }
 }
 
 impl Serialize for CommandError {

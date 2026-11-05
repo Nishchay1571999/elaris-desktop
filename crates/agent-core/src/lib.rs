@@ -10,7 +10,10 @@
 mod claude;
 mod mock;
 
-pub use claude::{ClaudeAgent, Notice, SidecarCommand, TerminalRequest};
+pub use claude::{
+    ClaudeAgent, ContextsRequest, DesktopRequest, MouseButton, Notice, ResultImage, ScrollDirection, SidecarCommand,
+    TerminalRequest,
+};
 pub use mock::MockAgent;
 pub use tokio_util::sync::CancellationToken;
 

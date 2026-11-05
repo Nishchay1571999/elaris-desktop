@@ -8,9 +8,31 @@ import type { PermissionDecision } from "@/bindings/PermissionDecision"
 import type { Session } from "@/bindings/Session"
 import type { SessionSettings } from "@/bindings/SessionSettings"
 import type { SessionSummary } from "@/bindings/SessionSummary"
+import type { Subagent } from "@/bindings/Subagent"
 import type { TokenUsage } from "@/bindings/TokenUsage"
 import { errorMessage, ipc, type NewImage } from "@/lib/ipc"
+import { useChatStatus } from "@/stores/chat-status"
+import { usePreferences } from "@/stores/preferences"
 import { useUi } from "@/stores/ui"
+
+/** A message for a subagent, waiting to be sent. */
+export interface QueuedInput {
+  agent: string
+  text: string
+}
+
+/**
+ * A message the user sent that hasn't reached the chat yet: it waits for the running
+ * reply to stop, or failed to send.
+ */
+export interface OutgoingMessage {
+  key: string
+  text: string
+  images: NewImage[]
+  status: "waiting" | "sending" | "failed"
+}
+
+export type SendResult = "sent" | "not-sent" | "no-chat"
 
 /** A permission prompt or question from the agent, still waiting for the user. */
 export type PendingRequest = Extract<AgentEvent, { type: "permission-request" | "question" }>
@@ -23,6 +45,10 @@ interface SessionsState {
   streaming: Record<string, true>
   /** Permission prompts and questions waiting for the user, by chat id. */
   requests: Record<string, PendingRequest[]>
+  /** Messages for subagents waiting for the chat's reply to end, by chat id. */
+  queued: Record<string, QueuedInput[]>
+  /** The user's messages on their way into the chat, oldest first, by chat id. */
+  outbox: Record<string, OutgoingMessage[]>
   /** Settings for the next chat, before it exists. */
   draft: SessionSettings
   error: string | null
@@ -35,9 +61,21 @@ interface SessionsState {
   resumeLive: () => Promise<void>
   /**
    * Sends in `sessionId`, or creates a chat first when it's `null`. A reply still running
-   * there is stopped first, so the message goes in mid-task. Resolves false if it failed.
+   * there is stopped first, so the message goes in mid-task; meanwhile it waits in
+   * `outbox`, and anything else sent then goes along with it. Resolves once it went,
+   * failed (it stays in `outbox` to retry) or was taken back; `no-chat` when the chat
+   * couldn't be created, so the message is nowhere.
    */
-  send: (sessionId: string | null, text: string, images?: NewImage[]) => Promise<boolean>
+  send: (sessionId: string | null, text: string, images?: NewImage[]) => Promise<SendResult>
+  /** Sends a failed message from `outbox` again. */
+  retry: (sessionId: string, key: string) => Promise<void>
+  /** Takes a message back out of `outbox` before it goes; returns it, or null if it's already sending. */
+  unsend: (sessionId: string, key: string) => OutgoingMessage | null
+  /**
+   * Sends `text` to subagent `agent` from its tab. Unlike `send` it never interrupts: while
+   * a reply is running it waits in `queued` and goes once the reply ends.
+   */
+  sendToAgent: (sessionId: string, agent: string, text: string) => Promise<void>
   stop: (id: string) => Promise<void>
   answerPermission: (sessionId: string, requestId: string, decision: PermissionDecision) => Promise<void>
   /** `answers` maps question text to answer; `null` skips. */
@@ -50,26 +88,29 @@ interface SessionsState {
 
 /** Mirrors `Message::apply` in `crates/agent-protocol`. */
 export function applyEvent(message: Message, event: AgentEvent): Message {
-  const parts = [...message.parts]
   switch (event.type) {
-    case "text-delta": {
-      const last = parts.at(-1)
-      if (last?.type === "text") parts[parts.length - 1] = { ...last, text: last.text + event.delta }
-      else parts.push({ type: "text", text: event.delta })
-      return { ...message, content: message.content + event.delta, parts }
-    }
-    case "tool-start": {
-      const { id, name, summary, input } = event
-      parts.push({ type: "tool", id, name, summary, input, status: "running", output: null })
-      return { ...message, parts }
-    }
+    case "text-delta":
+      return { ...message, content: message.content + event.delta, parts: fold(message.parts, event) }
+    case "tool-start":
     case "tool-end":
-      return {
-        ...message,
-        parts: parts.map((p): Part =>
-          p.type === "tool" && p.id === event.id ? { ...p, status: event.ok ? "done" : "failed", output: event.output } : p,
-        ),
-      }
+      return { ...message, parts: fold(message.parts, event) }
+    case "subagent-start":
+      return updateSubagent(message, event.agent, (a) => ({
+        ...a,
+        status: "running",
+        toolId: a.toolId ?? event.toolId,
+        description: a.description || event.description,
+      }))
+    case "subagent":
+      return updateSubagent(message, event.agent, (a) => ({ ...a, parts: fold(a.parts, event.event) }))
+    case "subagent-input":
+      return updateSubagent(message, event.agent, (a) => ({
+        ...a,
+        status: "running",
+        parts: [...a.parts, { type: "input", text: event.text }],
+      }))
+    case "subagent-end":
+      return updateSubagent(message, event.agent, (a) => ({ ...a, status: event.status, parts: failRunning(a.parts) }))
     case "finish":
       return finish(message, "complete")
     case "stopped":
@@ -79,6 +120,41 @@ export function applyEvent(message: Message, event: AgentEvent): Message {
     default:
       return message
   }
+}
+
+/** Folds a `text-delta`, `tool-start` or `tool-end` into `parts`. */
+function fold(parts: Part[], event: AgentEvent): Part[] {
+  switch (event.type) {
+    case "text-delta": {
+      const last = parts.at(-1)
+      return last?.type === "text"
+        ? [...parts.slice(0, -1), { ...last, text: last.text + event.delta }]
+        : [...parts, { type: "text", text: event.delta }]
+    }
+    case "tool-start": {
+      const { id, name, summary, input } = event
+      return [...parts, { type: "tool", id, name, summary, input, status: "running", output: null }]
+    }
+    case "tool-end":
+      return parts.map((p): Part =>
+        p.type === "tool" && p.id === event.id ? { ...p, status: event.ok ? "done" : "failed", output: event.output } : p,
+      )
+    default:
+      return parts
+  }
+}
+
+/** Updates the reply's record of subagent `id`, adding it if it's new. */
+function updateSubagent(message: Message, id: string, update: (agent: Subagent) => Subagent): Message {
+  const found = message.agents.some((a) => a.id === id)
+  const agents = found
+    ? message.agents
+    : [...message.agents, { id, toolId: null, description: "", status: "running" as const, parts: [] }]
+  return { ...message, agents: agents.map((a) => (a.id === id ? update(a) : a)) }
+}
+
+function failRunning(parts: Part[]): Part[] {
+  return parts.map((p): Part => (p.type === "tool" && p.status === "running" ? { ...p, status: "failed" } : p))
 }
 
 /** Mirrors `TokenUsage`'s `+=` in `crates/agent-protocol`. */
@@ -95,11 +171,16 @@ function finish(message: Message, status: Message["status"]): Message {
   return {
     ...message,
     status,
-    parts: message.parts.map((p): Part => (p.type === "tool" && p.status === "running" ? { ...p, status: "failed" } : p)),
+    parts: failRunning(message.parts),
+    // The agent process they ran in is gone; their tabs stay, to resume them from.
+    agents: message.agents.map((a) => ({
+      ...a,
+      status: a.status === "running" ? "stopped" : a.status,
+      parts: failRunning(a.parts),
+    })),
   }
 }
 
-const DEFAULT_SETTINGS: SessionSettings = { mode: "agent", model: "claude-opus-5-5", permissions: "ask" }
 
 const INTERRUPT_TIMEOUT_MS = 10_000
 
@@ -108,6 +189,15 @@ const following = new Set<string>()
 
 export const useSessions = create<SessionsState>()((set, get) => {
   const putSession = (session: Session) => set((s) => ({ sessions: { ...s.sessions, [session.id]: session } }))
+  /**
+   * Updates a few fields of a loaded chat. The backend's copy of a streaming reply
+   * lags the live one here, so a whole session from it would undo streamed events.
+   */
+  const mergeSession = (id: string, patch: Partial<Session>) =>
+    set((s) => {
+      const session = s.sessions[id]
+      return session ? { sessions: { ...s.sessions, [id]: { ...session, ...patch } } } : {}
+    })
 
   const endStream = (id: string) => {
     following.delete(id)
@@ -118,6 +208,41 @@ export const useSessions = create<SessionsState>()((set, get) => {
       delete requests[id]
       return { streaming, requests }
     })
+    if (get().queued[id]?.length) void sendQueued(id)
+  }
+
+  /** Sends the oldest message queued for a subagent in `id`, once the backend is free too. */
+  const sendQueued = async (id: string) => {
+    try {
+      await waitIdle(id)
+    } catch {
+      return // Something else started meanwhile; this runs again when it ends.
+    }
+    const [next, ...rest] = get().queued[id] ?? []
+    if (!next || get().streaming[id]) return
+    set((s) => ({ queued: { ...s.queued, [id]: rest } }))
+    await startAgentSend(id, next)
+  }
+
+  const startAgentSend = async (id: string, { agent, text }: QueuedInput) => {
+    try {
+      const { result: session, ready } = await follow(id, (onEvent) => ipc.chat.sendAgent(id, agent, text, onEvent))
+      putSession(session)
+      ready()
+    } catch (error) {
+      endStream(id)
+      set({ error: errorMessage(error) })
+    }
+  }
+
+  /** Waits until no reply runs in `id`, here or in the backend. */
+  const waitIdle = async (id: string) => {
+    const deadline = Date.now() + INTERRUPT_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      if (!get().streaming[id] && !(await ipc.chat.running()).includes(id)) return
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    throw new Error("The current reply didn't stop in time; try again")
   }
 
   const handleEvent = (id: string, event: AgentEvent) => {
@@ -134,7 +259,12 @@ export const useSessions = create<SessionsState>()((set, get) => {
 
     const session = get().sessions[id]
     if (event.type === "usage") {
-      if (session) putSession({ ...session, usage: addUsage(session.usage, event.usage) })
+      if (session)
+        putSession({ ...session, usage: addUsage(session.usage, event.usage), context: event.context ?? session.context })
+      return
+    }
+    if (event.type === "mode") {
+      if (session) putSession({ ...session, mode: event.mode })
       return
     }
     const last = session?.messages.at(-1)
@@ -199,12 +329,76 @@ export const useSessions = create<SessionsState>()((set, get) => {
    */
   const interrupt = async (id: string) => {
     await ipc.chat.stop(id)
-    const deadline = Date.now() + INTERRUPT_TIMEOUT_MS
-    while (Date.now() < deadline) {
-      if (!get().streaming[id] && !(await ipc.chat.running()).includes(id)) return
-      await new Promise((resolve) => setTimeout(resolve, 50))
+    await waitIdle(id)
+  }
+
+  const waiting = (id: string) => (get().outbox[id] ?? []).filter((m) => m.status === "waiting")
+
+  /** Gives the outbox messages `keys` names in chat `id` a new status, or removes them (`null`). */
+  const setOutgoing = (id: string, keys: string[], status: OutgoingMessage["status"] | null) =>
+    set((s) => ({
+      outbox: {
+        ...s.outbox,
+        [id]: (s.outbox[id] ?? []).flatMap((m) => (!keys.includes(m.key) ? [m] : status ? [{ ...m, status }] : [])),
+      },
+    }))
+
+  /**
+   * Sends what's waiting in `id`'s outbox: stops the running reply, then sends every
+   * waiting message as one. Loops while more arrive.
+   */
+  const deliver = async (id: string) => {
+    while (waiting(id).length > 0) {
+      if (get().streaming[id]) {
+        try {
+          await interrupt(id)
+        } catch (error) {
+          // The old reply may still be running; leave its stream alone.
+          setOutgoing(id, waiting(id).map((m) => m.key), "failed")
+          set({ error: errorMessage(error) })
+          return
+        }
+      }
+      // Taken only now, so messages sent or taken back while the reply stopped count.
+      const batch = waiting(id)
+      if (batch.length === 0) return
+      const keys = batch.map((m) => m.key)
+      setOutgoing(id, keys, "sending")
+      const text = batch.map((m) => m.text).filter(Boolean).join("\n\n")
+      const images = batch.flatMap((m) => m.images)
+      try {
+        // Events can arrive before `send` resolves; hold them until the
+        // session (with its empty reply) is in the store.
+        const { result: session, ready } = await follow(id, (onEvent) => ipc.chat.send(id, text, images, onEvent))
+        putSession(session)
+        setOutgoing(id, keys, null)
+        ready()
+        void get().refresh()
+      } catch (error) {
+        endStream(id)
+        setOutgoing(id, keys, "failed")
+        set({ error: errorMessage(error) })
+        return
+      }
     }
-    throw new Error("The current reply didn't stop in time; try again")
+  }
+
+  /** Chats whose outbox is being delivered, so only one delivery runs per chat. */
+  const delivering = new Map<string, Promise<void>>()
+
+  /** Delivers `id`'s outbox until message `key` went, failed or was taken back. */
+  const settle = async (id: string, key: string): Promise<SendResult> => {
+    for (;;) {
+      let run = delivering.get(id)
+      if (!run) {
+        run = deliver(id).finally(() => delivering.delete(id))
+        delivering.set(id, run)
+      }
+      await run
+      const message = get().outbox[id]?.find((m) => m.key === key)
+      // Still waiting: it came in as the last delivery wound down.
+      if (message?.status !== "waiting") return message ? "not-sent" : "sent"
+    }
   }
 
   return {
@@ -212,7 +406,10 @@ export const useSessions = create<SessionsState>()((set, get) => {
     sessions: {},
     streaming: {},
     requests: {},
-    draft: DEFAULT_SETTINGS,
+    queued: {},
+    outbox: {},
+    // A new chat starts from Settings → Chat; changing it in the composer sticks until the app quits.
+    draft: usePreferences.getState().defaults,
     error: null,
 
     refresh: async () => {
@@ -255,37 +452,41 @@ export const useSessions = create<SessionsState>()((set, get) => {
 
     send: async (sessionId, text, images = []) => {
       let id = sessionId
-      try {
-        if (!id) {
+      if (!id) {
+        try {
           const created = await ipc.sessions.create(get().draft)
           putSession(created)
           id = created.id
           useUi.getState().replace({ sessionId: id, view: { kind: "chat" } })
+        } catch (error) {
+          set({ error: errorMessage(error) })
+          return "no-chat"
         }
-
-        if (get().streaming[id]) {
-          try {
-            await interrupt(id)
-          } catch (error) {
-            // The old reply may still be running; leave its stream alone.
-            set({ error: errorMessage(error) })
-            return false
-          }
-        }
-
-        // Events can arrive before `send` resolves; hold them until the
-        // session (with its empty reply) is in the store.
-        const chatId = id
-        const { result: session, ready } = await follow(chatId, (onEvent) => ipc.chat.send(chatId, text, images, onEvent))
-        putSession(session)
-        ready()
-        void get().refresh()
-        return true
-      } catch (error) {
-        if (id) endStream(id)
-        set({ error: errorMessage(error) })
-        return false
       }
+      const message: OutgoingMessage = { key: crypto.randomUUID(), text, images, status: "waiting" }
+      const chatId = id
+      set((s) => ({ outbox: { ...s.outbox, [chatId]: [...(s.outbox[chatId] ?? []), message] } }))
+      return settle(chatId, message.key)
+    },
+
+    retry: async (sessionId, key) => {
+      setOutgoing(sessionId, [key], "waiting")
+      await settle(sessionId, key)
+    },
+
+    unsend: (sessionId, key) => {
+      const message = get().outbox[sessionId]?.find((m) => m.key === key)
+      if (!message || message.status === "sending") return null
+      setOutgoing(sessionId, [key], null)
+      return message
+    },
+
+    sendToAgent: async (sessionId, agent, text) => {
+      const input = { agent, text }
+      if (!get().streaming[sessionId] && !get().queued[sessionId]?.length) return startAgentSend(sessionId, input)
+      // Behind a running reply, or earlier messages still on their way: keep the order.
+      set((s) => ({ queued: { ...s.queued, [sessionId]: [...(s.queued[sessionId] ?? []), input] } }))
+      if (!get().streaming[sessionId]) await sendQueued(sessionId)
     },
 
     stop: async (id) => {
@@ -317,7 +518,8 @@ export const useSessions = create<SessionsState>()((set, get) => {
       if (!session) return
       const { mode, model, permissions } = { ...session, ...patch }
       try {
-        putSession(await ipc.sessions.updateSettings(sessionId, { mode, model, permissions }))
+        const saved = await ipc.sessions.updateSettings(sessionId, { mode, model, permissions })
+        mergeSession(sessionId, { mode: saved.mode, model: saved.model, permissions: saved.permissions })
       } catch (error) {
         set({ error: errorMessage(error) })
       }
@@ -325,7 +527,7 @@ export const useSessions = create<SessionsState>()((set, get) => {
 
     rename: async (id, title) => {
       try {
-        putSession(await ipc.sessions.rename(id, title))
+        mergeSession(id, { title: (await ipc.sessions.rename(id, title)).title })
         await get().refresh()
       } catch (error) {
         set({ error: errorMessage(error) })
@@ -341,6 +543,7 @@ export const useSessions = create<SessionsState>()((set, get) => {
           return { sessions }
         })
         useUi.getState().forgetSession(id)
+        useChatStatus.getState().forget(id)
         await get().refresh()
       } catch (error) {
         set({ error: errorMessage(error) })

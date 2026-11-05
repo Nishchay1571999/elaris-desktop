@@ -1,5 +1,5 @@
 /**
- * The agent's shell, file and git tools as the Tools page shows them, and how
+ * The agent's shell, file, git and desktop tools as the Tools page shows them, and how
  * each maps onto Claude Code's permission rules in `~/.claude/settings.json`.
  *
  * Git has no tools of its own: the agent runs `git` through Bash, so each git
@@ -29,6 +29,8 @@ export interface ToolGroup {
 
 const BASH = "bash"
 const bash = (...commands: string[]) => commands.map((c) => `Bash(${c}:*)`)
+const desktop = (...actions: string[]) => actions.map((a) => `mcp__desktop-control__${a}`)
+const device = (...tools: string[]) => tools.map((t) => `mcp__device-control__${t}`)
 
 export const TOOL_GROUPS: ToolGroup[] = [
   {
@@ -124,6 +126,62 @@ export const TOOL_GROUPS: ToolGroup[] = [
         rules: bash("git reset", "git rebase", "git restore", "git clean"),
         fallback: "ask",
         parent: BASH,
+      },
+    ],
+  },
+  {
+    id: "desktop",
+    title: "Desktop",
+    description: "Using your Mac's screen, mouse and keyboard as you would. Elaris only, macOS only.",
+    tools: [
+      {
+        id: "desktop-screenshot",
+        name: "See the screen",
+        description: "Take screenshots of the main display. macOS asks for Screen Recording the first time.",
+        rules: desktop("screenshot"),
+        fallback: "ask",
+      },
+      {
+        id: "desktop-input",
+        name: "Use the mouse and keyboard",
+        description: "Click, drag, scroll, type and press shortcuts. macOS asks for Accessibility the first time.",
+        rules: desktop("click", "move", "drag", "scroll", "type", "key"),
+        fallback: "ask",
+      },
+      {
+        id: "desktop-open",
+        name: "Open apps and links",
+        description: "Launch an app or open a URL, bringing it to the front.",
+        rules: desktop("open"),
+        fallback: "ask",
+      },
+    ],
+  },
+  {
+    id: "devices",
+    title: "Devices",
+    description: "Android emulators and iOS simulators: reading the screen as text, tapping and typing, app logs and data. Elaris only; iOS needs AXe (brew install cameroncooke/axe/axe).",
+    tools: [
+      {
+        id: "device-read",
+        name: "Read devices and apps",
+        description: "List devices, read the screen, read an app's logs, files and databases. Changes nothing.",
+        rules: device("devices", "screen", "logs", "app_data"),
+        fallback: "allow",
+      },
+      {
+        id: "device-act",
+        name: "Tap, type and swipe",
+        description: "Use the app on the device as a person would, in batches of steps.",
+        rules: device("act"),
+        fallback: "ask",
+      },
+      {
+        id: "device-manage",
+        name: "Start devices and manage apps",
+        description: "Boot an emulator or simulator; launch, stop, install, uninstall or clear an app.",
+        rules: device("boot", "app"),
+        fallback: "ask",
       },
     ],
   },

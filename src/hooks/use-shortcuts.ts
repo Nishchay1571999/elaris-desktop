@@ -1,52 +1,40 @@
 import { useEffect } from "react"
 
+import { COMMANDS, effectiveBindings } from "@/lib/commands"
+import { matches } from "@/lib/keybindings"
 import { isInTerminal } from "@/lib/terminals"
 import { isMac } from "@/lib/utils"
-import { useSessions } from "@/stores/sessions"
-import { useUi } from "@/stores/ui"
-import { useWorkspace } from "@/stores/workspace"
+import { usePreferences } from "@/stores/preferences"
+
+/** Where Ctrl keys mean something to the user (emacs keys on macOS, shells), so only ⌘ is the app's. */
+function ownsCtrl(target: EventTarget | null): boolean {
+  if (isInTerminal(target)) return true
+  return target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA)$/.test(target.tagName))
+}
 
 /**
- * App-wide shortcuts: ⌘N new chat, ⌘O open folder, ⌘B / ⌘⌥B toggle panels, ⌘[ / ⌘] history,
- * ⌘T / Ctrl+T a terminal tab in the open chat. Inside a terminal only ⌘ (and ⌘/Ctrl+T) are
- * the app's; other Ctrl keys go to the shell.
+ * App-wide shortcuts, from the command list (lib/commands.ts) with the user's changes
+ * from Settings → Keyboard. Inside a terminal only ⌘ (and the new-terminal key) are the
+ * app's; other Ctrl keys go to the shell.
  */
 export function useShortcuts() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.shiftKey) return
-      if (isInTerminal(e.target) && e.code !== "KeyT" && !(isMac && e.metaKey)) return
-      const ui = useUi.getState()
-      // `code` so ⌥ doesn't change the letter on macOS.
-      switch (e.code) {
-        case "KeyT": {
-          const { sessionId, view } = ui.history[ui.index]
-          // Only where the tab bar shows: a chat with messages, not the new-chat screen.
-          const session = sessionId ? useSessions.getState().sessions[sessionId] : undefined
-          if (view.kind !== "chat" || !session?.messages.length) return
-          void ui.openTerminal(session.id)
-          break
-        }
-        case "KeyN":
-          ui.newChat()
-          break
-        case "KeyO":
-          void useWorkspace.getState().pickAndOpen()
-          break
-        case "KeyB":
-          if (e.altKey) ui.setRightOpen(!ui.rightOpen)
-          else ui.setLeftOpen(!ui.leftOpen)
-          break
-        case "BracketLeft":
-          ui.back()
-          break
-        case "BracketRight":
-          ui.forward()
-          break
-        default:
-          return
+      // A shortcut field in Settings is recording this key.
+      if (e.defaultPrevented) return
+      const bindings = effectiveBindings(usePreferences.getState().keybindings)
+      const strict = ownsCtrl(e.target)
+      const inTerminal = isInTerminal(e.target)
+      for (const command of COMMANDS) {
+        const binding = bindings[command.id]
+        if (!binding || !matches(e, binding, strict)) continue
+        // Off macOS, Ctrl is both the app's modifier and the shell's: only a new terminal is taken.
+        if (inTerminal && !isMac && command.id !== "terminal.new") return
+        if (command.available && !command.available()) return
+        e.preventDefault()
+        command.run()
+        return
       }
-      e.preventDefault()
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)

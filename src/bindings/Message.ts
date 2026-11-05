@@ -3,6 +3,7 @@ import type { ImageAttachment } from "./ImageAttachment";
 import type { MessageRole } from "./MessageRole";
 import type { MessageStatus } from "./MessageStatus";
 import type { Part } from "./Part";
+import type { Subagent } from "./Subagent";
 
 export type Message = { id: string, role: MessageRole, 
 /**
@@ -17,6 +18,10 @@ parts: Array<Part>,
  * Images the user attached. Empty for assistant messages.
  */
 images: Array<ImageAttachment>, 
+/**
+ * Subagents the reply started or resumed. Empty for user messages.
+ */
+agents: Array<Subagent>, 
 /**
  * Epoch milliseconds.
  */

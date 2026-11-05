@@ -15,7 +15,7 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
   )
 })
 
-function CodeBlock({ children, ...props }: ComponentProps<"pre">) {
+export function CodeBlock({ children, ...props }: ComponentProps<"pre">) {
   const [copied, setCopied] = useState(false)
   const code = children as { props?: { className?: string; children?: unknown } } | undefined
   const language = /language-(\S+)/.exec(code?.props?.className ?? "")?.[1]

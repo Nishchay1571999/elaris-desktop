@@ -1,4 +1,4 @@
-use agent_protocol::{Session, SessionSettings, SessionSummary, TokenUsage};
+use agent_protocol::{MOCK_MODEL, Session, SessionSettings, SessionSummary, TokenUsage};
 use tauri::State;
 
 use crate::error::{CommandError, CommandResult};
@@ -48,6 +48,7 @@ pub fn sessions_create(state: State<'_, AppState>, settings: SessionSettings) ->
         workspace: state.workspace().map(|w| w.root().display().to_string()),
         agent_session_id: None,
         usage: Default::default(),
+        context: 0,
         messages: Vec::new(),
     };
     state.store.insert(&session)?;
@@ -64,14 +65,21 @@ pub fn sessions_rename(state: State<'_, AppState>, id: String, title: String) ->
     })?)
 }
 
-/// Mode, model and permission policy; they apply from the next message.
+/// Mode, model and permission policy. A reply in flight switches to them
+/// straight away, except Ask's no-edit rule, which applies from the next message.
 #[tauri::command]
-pub fn sessions_update_settings(
+pub async fn sessions_update_settings(
     state: State<'_, AppState>,
     id: String,
     settings: SessionSettings,
 ) -> CommandResult<Session> {
-    Ok(state.store.update(&id, |session| session.apply_settings(settings))?)
+    let session = state.store.update(&id, |session| session.apply_settings(settings.clone()))?;
+    // The mock agent has nothing to switch, and the real one can't switch to it.
+    if state.is_running(&id) && settings.model != MOCK_MODEL {
+        // The run may have just ended; the saved settings cover the next one.
+        let _ = state.claude.update_settings(&id, &settings).await;
+    }
+    Ok(session)
 }
 
 #[tauri::command]

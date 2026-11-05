@@ -6,6 +6,7 @@
 
 mod fs;
 mod git;
+mod logo;
 mod watch;
 
 use std::path::{Path, PathBuf};
@@ -14,7 +15,8 @@ use serde::Serialize;
 use ts_rs::TS;
 
 pub use fs::{FileEntry, FilePreview};
-pub use git::{ChangeKind, ChangedFile};
+pub use git::{Branches, ChangeKind, ChangedFile};
+pub use logo::{MAX_LOGO_BYTES, find_logo, image_mime};
 pub use watch::Watcher;
 
 #[derive(Debug, thiserror::Error)]
@@ -29,6 +31,9 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Git(#[from] git2::Error),
+    /// A git CLI command failed; holds what it printed.
+    #[error("{0}")]
+    GitCommand(String),
     #[error(transparent)]
     Walk(#[from] ignore::Error),
     #[error(transparent)]
@@ -48,6 +53,8 @@ pub struct WorkspaceInfo {
     pub is_git: bool,
     /// Current branch, or `None` for a detached HEAD or a non-git folder.
     pub branch: Option<String>,
+    /// The branch pull requests target, when one can be found.
+    pub default_branch: Option<String>,
 }
 
 /// An opened folder. Cheap to clone; holds no handles.
@@ -81,7 +88,18 @@ impl Workspace {
             root: self.root.display().to_string(),
             is_git,
             branch,
+            default_branch: if is_git { git::default_branch(&self.root) } else { None },
         }
+    }
+
+    pub fn branches(&self) -> Result<Branches> {
+        git::branches(&self.root)
+    }
+
+    /// Checks out a local branch, or a remote one (`origin/name`) as a local
+    /// tracking branch. Uncommitted changes are carried over to it.
+    pub fn switch_branch(&self, name: &str) -> Result<()> {
+        git::switch(&self.root, name)
     }
 
     /// Immediate children of `rel` (`""` for the root): folders first, then

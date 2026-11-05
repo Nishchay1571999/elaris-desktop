@@ -11,7 +11,7 @@ use serde::Deserialize;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::agent_terminal;
+use crate::{agent_contexts, agent_desktop, agent_device, agent_terminal};
 use crate::error::{CommandError, CommandResult, blocking};
 use crate::state::AppState;
 use crate::store::now_ms;
@@ -44,24 +44,115 @@ pub fn chat_send(
     images: Vec<NewImage>,
     on_event: Channel<AgentEvent>,
 ) -> CommandResult<Session> {
-    let now = now_ms();
-    let reply = message(MessageRole::Assistant, String::new(), MessageStatus::Streaming, now);
-    let cancel = state.begin_run(&session_id, reply.clone(), on_event)?;
-    let images = match save_images(&state, &session_id, images) {
-        Ok(images) => images,
-        Err(e) => {
-            state.end_run(&session_id);
-            return Err(e);
-        }
-    };
+    run(app, state, session_id, Outgoing::User { text, images }, on_event)
+}
 
+/// Sends `text` to subagent `agent` from its tab: the chat's agent passes it
+/// on with `SendMessage`, which resumes the subagent if it had finished. Only
+/// a reply is appended, starting with the text as the subagent's input; the
+/// subagent's work streams into it like any other.
+#[tauri::command]
+pub fn chat_send_agent(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    agent: String,
+    text: String,
+    on_event: Channel<AgentEvent>,
+) -> CommandResult<Session> {
+    run(app, state, session_id, Outgoing::Subagent { agent, text }, on_event)
+}
+
+/// What the user sent: a chat message, or a message for one of its subagents.
+enum Outgoing {
+    User { text: String, images: Vec<NewImage> },
+    Subagent { agent: String, text: String },
+}
+
+/// Everything before the latest user message, newest kept when it's long.
+fn earlier_conversation(messages: &[(MessageRole, String)]) -> Option<String> {
+    const MAX: usize = 60_000;
+    let last_user = messages.iter().rposition(|(role, _)| *role == MessageRole::User)?;
+    let text = messages[..last_user]
+        .iter()
+        .filter(|(_, content)| !content.trim().is_empty())
+        .map(|(role, content)| {
+            let who = if *role == MessageRole::User { "User" } else { "Assistant" };
+            format!("{who}: {}", content.trim())
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if text.is_empty() {
+        return None;
+    }
+    let start = text.len().saturating_sub(MAX);
+    let start = (start..=text.len()).find(|&i| text.is_char_boundary(i)).unwrap_or(text.len());
+    Some(if start > 0 { format!("…{}", &text[start..]) } else { text })
+}
+
+fn relay_prompt(agent: &str, text: &str) -> String {
+    format!(
+        "The user wrote this to your subagent {agent} from its tab in Elaris. Pass it on unchanged with \
+         SendMessage (to: \"{agent}\") and don't act on it yourself. Once it's sent, say so in one short line.\n\n\
+         <message>\n{text}\n</message>"
+    )
+}
+
+fn run(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    outgoing: Outgoing,
+    on_event: Channel<AgentEvent>,
+) -> CommandResult<Session> {
+    // Saved contexts (`#ctx-…`) and pull requests and issues (`%pr-…`) the message
+    // references go to the agent; the chat keeps the message as typed.
+    let expanded = match &outgoing {
+        Outgoing::User { text, .. } => Some(state.contexts.expand(text)?),
+        Outgoing::Subagent { .. } => None,
+    };
+    let item_images = expanded.as_ref().map(|e| e.images.clone()).unwrap_or_default();
+    let expanded = expanded.map(|e| e.prompt);
+    let now = now_ms();
+    let mut reply = message(MessageRole::Assistant, String::new(), MessageStatus::Streaming, now);
+    if let Outgoing::Subagent { agent, text } = &outgoing {
+        reply.apply(&AgentEvent::SubagentInput { agent: agent.clone(), text: text.clone() });
+    }
+    let cancel = state.begin_run(&session_id, reply.clone(), on_event)?;
+    let (prompt, images) = match outgoing {
+        Outgoing::User { text, images } => match save_images(&state, &session_id, images) {
+            Ok(images) => (text, images),
+            Err(e) => {
+                state.end_run(&session_id);
+                return Err(e);
+            }
+        },
+        Outgoing::Subagent { agent, text } => (relay_prompt(&agent, &text), Vec::new()),
+    };
+    // A relayed message isn't the user's own turn in the chat.
+    let relayed = !reply.agents.is_empty();
+
+    // The chat works in the folder selected at the top, wherever it started.
+    let open_root = state.workspace().map(|w| w.root().display().to_string());
+    let mut moved = false;
     let appended = state.store.update(&session_id, |session| {
-        if session.messages.is_empty() {
-            session.title = if text.trim().is_empty() { "Image".into() } else { title_from(&text) };
+        if let Some(root) = &open_root
+            && session.workspace.as_ref() != Some(root)
+        {
+            // The agent keeps its history per folder, so a chat that moves
+            // starts a fresh agent session and hands it the conversation.
+            moved = session.workspace.is_some() && session.agent_session_id.is_some();
+            session.workspace = Some(root.clone());
+            session.agent_session_id = None;
         }
-        let mut prompt = message(MessageRole::User, text.clone(), MessageStatus::Complete, now);
-        prompt.images = images.clone();
-        session.messages.push(prompt);
+        if !relayed {
+            if session.messages.is_empty() {
+                session.title = if prompt.trim().is_empty() { "Image".into() } else { title_from(&prompt) };
+            }
+            let mut user = message(MessageRole::User, prompt.clone(), MessageStatus::Complete, now);
+            user.images = images.clone();
+            session.messages.push(user);
+        }
         session.messages.push(reply.clone());
         session.updated_at = now;
     });
@@ -74,31 +165,50 @@ pub fn chat_send(
     };
 
     let workspace = state.workspace();
-    // Run where the chat started; fall back to whatever is open now.
-    let cwd: Option<PathBuf> =
-        session.workspace.clone().map(Into::into).or_else(|| workspace.as_ref().map(|w| w.root().to_path_buf()));
+    let cwd: Option<PathBuf> = session.workspace.clone().map(Into::into);
     // Always-allow rules are kept by this folder.
     let root = cwd.as_ref().map(|dir| dir.display().to_string());
+    let mut messages: Vec<_> = session
+        .messages
+        .iter()
+        .filter(|m| m.status == MessageStatus::Complete)
+        .map(|m| (m.role, m.content.clone()))
+        .collect();
+    if relayed {
+        messages.push((MessageRole::User, prompt));
+    }
+    if let Some(expanded) = expanded
+        && let Some((_, content)) = messages.iter_mut().rev().find(|(role, _)| *role == MessageRole::User)
+    {
+        *content = expanded;
+    }
+    if moved && let Some(earlier) = earlier_conversation(&messages) {
+        if let Some((_, content)) = messages.iter_mut().rev().find(|(role, _)| *role == MessageRole::User) {
+            *content = format!(
+                "This chat continues in a different project folder ({}). The conversation so far:\n\n\
+                 <earlier-conversation>\n{earlier}\n</earlier-conversation>\n\n{content}",
+                root.as_deref().unwrap_or_default()
+            );
+        }
+    }
     let request = AgentRequest {
         session_id: session_id.clone(),
-        messages: session
-            .messages
-            .iter()
-            .filter(|m| m.status == MessageStatus::Complete)
-            .map(|m| (m.role, m.content.clone()))
-            .collect(),
+        messages,
         settings: session.settings(),
         cwd,
         workspace_name: workspace.and_then(|w| w.root().file_name().map(|n| n.to_string_lossy().into_owned())),
         resume: session.agent_session_id.clone(),
         allowed_tools: root.as_deref().map(|root| state.store.allowed_tools(root)).unwrap_or_default(),
-        // Just saved, so their paths are valid.
+        // Just saved, so their paths are valid. Then images from referenced
+        // pull requests and issues, as many as still fit.
         images: images
             .iter()
             .filter_map(|image| {
                 let path = state.store.image_path(&session_id, image).ok()?;
                 Some(PromptImage { media_type: image.media_type.clone(), path })
             })
+            .chain(item_images.into_iter().map(|asset| PromptImage { media_type: asset.content_type, path: asset.path }))
+            .take(MAX_IMAGES)
             .collect(),
     };
 
@@ -115,10 +225,21 @@ pub fn chat_send(
         };
         let mut emit = |event: AgentEvent| {
             state.publish(&session_id, &event);
-            if let AgentEvent::Usage { usage } = &event {
-                let _ = state.store.update(&session_id, |session| session.usage += *usage);
+            match &event {
+                AgentEvent::Usage { usage, context } => {
+                    let _ = state.store.update(&session_id, |session| {
+                        session.usage += *usage;
+                        if let Some(context) = context {
+                            session.context = *context;
+                        }
+                    });
+                }
+                AgentEvent::Mode { mode } => {
+                    let _ = state.store.update(&session_id, |session| session.mode = *mode);
+                }
+                _ => {}
             }
-            if matches!(event, AgentEvent::ToolEnd { .. })
+            if matches!(event, AgentEvent::ToolEnd { .. } | AgentEvent::SubagentEnd { .. })
                 && let Some(reply) = state.reply(&session_id)
             {
                 save(&reply);
@@ -158,6 +279,56 @@ pub fn chat_send(
                             Err(text) => (false, text),
                         };
                         let _ = state.claude.answer_terminal(&session_id, &request_id, ok, &text).await;
+                    });
+                }
+                Notice::Desktop { request_id, request: call } => {
+                    let (app, session_id) = (app.clone(), session_id.clone());
+                    tauri::async_runtime::spawn(async move {
+                        let result = tauri::async_runtime::spawn_blocking(move || agent_desktop::handle(call))
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string()));
+                        let (ok, answer) = match result {
+                            Ok(answer) => (true, answer),
+                            Err(text) => (false, text.into()),
+                        };
+                        let state = app.state::<AppState>();
+                        let _ = state
+                            .claude
+                            .answer_desktop(&session_id, &request_id, ok, &answer.text, answer.image.as_ref())
+                            .await;
+                    });
+                }
+                Notice::Device { request_id, request: call } => {
+                    let (app, session_id) = (app.clone(), session_id.clone());
+                    tauri::async_runtime::spawn(async move {
+                        let result = tauri::async_runtime::spawn_blocking(move || agent_device::handle(call))
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string()));
+                        let (ok, answer) = match result {
+                            Ok(answer) => (true, answer),
+                            Err(text) => (false, text.into()),
+                        };
+                        let state = app.state::<AppState>();
+                        let _ = state
+                            .claude
+                            .answer_device(&session_id, &request_id, ok, &answer.text, answer.image.as_ref())
+                            .await;
+                    });
+                }
+                Notice::Contexts { request_id, request: call } => {
+                    let (app, session_id) = (app.clone(), session_id.clone());
+                    tauri::async_runtime::spawn(async move {
+                        let reader = app.clone();
+                        let result = tauri::async_runtime::spawn_blocking(move || {
+                            agent_contexts::handle(&reader.state::<AppState>().contexts, call)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()));
+                        let (ok, text) = match result {
+                            Ok(text) => (true, text),
+                            Err(text) => (false, text),
+                        };
+                        let _ = app.state::<AppState>().claude.answer_contexts(&session_id, &request_id, ok, &text).await;
                     });
                 }
             };
@@ -282,6 +453,7 @@ fn message(role: MessageRole, content: String, status: MessageStatus, now: i64) 
         content,
         parts: Vec::new(),
         images: Vec::new(),
+        agents: Vec::new(),
         created_at: now,
         status,
         error: None,

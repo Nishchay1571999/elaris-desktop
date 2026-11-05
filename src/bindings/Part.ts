@@ -4,4 +4,4 @@ import type { ToolStatus } from "./ToolStatus";
 /**
  * A piece of an assistant reply, in the order it happened.
  */
-export type Part = { "type": "text", text: string, } | { "type": "tool", id: string, name: string, summary: string, status: ToolStatus, input: Record<string, unknown>, output: string | null, };
+export type Part = { "type": "text", text: string, } | { "type": "tool", id: string, name: string, summary: string, status: ToolStatus, input: Record<string, unknown>, output: string | null, } | { "type": "input", text: string, };

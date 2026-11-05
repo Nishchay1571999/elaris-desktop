@@ -1,12 +1,13 @@
 import { ArrowLeft, ArrowRight, GitBranch, PanelLeft, PanelRight } from "lucide-react"
 
+import { ProjectLogo } from "@/components/workspace/project-logo"
 import { WorkspaceMenu } from "@/components/workspace/workspace-menu"
 import { IconButton } from "@/components/ui/button"
+import { useBinding } from "@/lib/commands"
+import { formatBinding } from "@/lib/keybindings"
 import { cn, isMac } from "@/lib/utils"
 import { useUi } from "@/stores/ui"
 import { useWorkspace } from "@/stores/workspace"
-
-const mod = isMac ? "⌘" : "Ctrl+"
 
 /**
  * The window's title bar. On macOS the native one is hidden behind this
@@ -15,6 +16,8 @@ const mod = isMac ? "⌘" : "Ctrl+"
 export function Titlebar() {
   const { leftOpen, rightOpen, index, history, back, forward, setLeftOpen, setRightOpen } = useUi()
   const info = useWorkspace((s) => s.info)
+  const sidebarKey = formatBinding(useBinding("view.sidebar"))
+  const rightKey = formatBinding(useBinding("view.rightPanel"))
 
   return (
     <header
@@ -22,7 +25,7 @@ export function Titlebar() {
       className={cn("flex h-10 shrink-0 items-center gap-1 border-b border-border pr-2", isMac ? "pl-20" : "pl-2")}
     >
       <IconButton
-        label={`${leftOpen ? "Hide" : "Show"} sidebar (${mod}B)`}
+        label={`${leftOpen ? "Hide" : "Show"} sidebar${sidebarKey && ` (${sidebarKey})`}`}
         onClick={() => setLeftOpen(!leftOpen)}
       >
         <PanelLeft className="size-4" />
@@ -43,6 +46,7 @@ export function Titlebar() {
           >
             {info ? (
               <>
+                <ProjectLogo root={info.root} />
                 <span className="truncate text-foreground">{info.name}</span>
                 {info.branch && (
                   <span className="flex items-center gap-1 text-xs text-subtle-foreground">
@@ -59,7 +63,7 @@ export function Titlebar() {
       </div>
 
       <IconButton
-        label={`${rightOpen ? "Hide" : "Show"} files panel (${mod}⌥B)`}
+        label={`${rightOpen ? "Hide" : "Show"} files panel${rightKey && ` (${rightKey})`}`}
         onClick={() => setRightOpen(!rightOpen)}
       >
         <PanelRight className="size-4" />

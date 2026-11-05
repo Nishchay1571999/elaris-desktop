@@ -8,7 +8,10 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event"
 import { ask, open } from "@tauri-apps/plugin-dialog"
 
 import type { AgentEvent } from "@/bindings/AgentEvent"
+import type { Branches } from "@/bindings/Branches"
 import type { ChangedFile } from "@/bindings/ChangedFile"
+import type { ContextSummary } from "@/bindings/ContextSummary"
+import type { ItemSummary } from "@/bindings/ItemSummary"
 import type { FileEntry } from "@/bindings/FileEntry"
 import type { FilePreview } from "@/bindings/FilePreview"
 import type { Highlights } from "@/bindings/Highlights"
@@ -27,6 +30,26 @@ import type { SessionSummary } from "@/bindings/SessionSummary"
 import type { SkillListing } from "@/bindings/SkillListing"
 import type { TokenUsage } from "@/bindings/TokenUsage"
 import type { WorkspaceInfo } from "@/bindings/WorkspaceInfo"
+import type {
+  BranchPr,
+  GhAsset,
+  GhLabel,
+  GhRepo,
+  GhRepoRef,
+  GhStatus,
+  IssueDetail,
+  IssueStateChange,
+  MergeMethod,
+  PrDetail,
+  PrFilter,
+  PrStateChange,
+  PrSummary,
+  ReviewAction,
+  SearchFilters,
+  SearchItem,
+  SetupEvent,
+  TrackerKind,
+} from "@/lib/github"
 
 export const ipc = {
   workspace: {
@@ -35,6 +58,10 @@ export const ipc = {
     recent: () => invoke<string[]>("workspace_recent"),
     listDir: (path: string) => invoke<FileEntry[]>("workspace_list_dir", { path }),
     readFile: (path: string) => invoke<FilePreview>("workspace_read_file", { path }),
+    /** Any folder's favicon or `logo.*` as a `data:` URL, or null. */
+    logo: (path: string) => invoke<string | null>("workspace_logo", { path }),
+    /** An image file (absolute path) as a `data:` URL, for a custom logo. */
+    imageDataUrl: (path: string) => invoke<string>("read_image_data_url", { path }),
     /** Debounced batches of changed workspace-relative paths. */
     onChanged: (handler: (paths: string[]) => void): Promise<UnlistenFn> =>
       listen<{ paths: string[] }>("workspace://changed", (event) => handler(event.payload.paths)),
@@ -42,7 +69,63 @@ export const ipc = {
   git: {
     status: () => invoke<ChangedFile[]>("git_status"),
     diff: (path: string) => invoke<string>("git_diff", { path }),
+    branches: () => invoke<Branches>("git_branches"),
+    /** Checks out `name`; a remote branch (`origin/name`) becomes a local tracking branch. */
+    switch: (name: string) => invoke<void>("git_switch", { name }),
+    /** Creates a branch from HEAD and switches to it, keeping uncommitted changes. */
+    createBranch: (name: string) => invoke<void>("git_create_branch", { name }),
+    /** Stages `paths` (or everything) and commits; returns the short hash. */
+    commit: (message: string, paths: string[] | null) =>
+      invoke<string>("git_commit", { request: { message, paths } }),
+    push: () => invoke<void>("git_push"),
+    /** Commits on this branch that `base` lacks, oldest first. */
+    logRange: (base: string) => invoke<Array<{ subject: string; body: string }>>("git_log_range", { base }),
   },
+  github: {
+    status: () => invoke<GhStatus>("gh_status"),
+    install: (onEvent: (event: SetupEvent) => void) => invoke<void>("gh_install", { onEvent: setupChannel(onEvent) }),
+    /** Device-flow sign-in; the one-time code arrives as a `code` event. Resolves once signed in. */
+    login: (onEvent: (event: SetupEvent) => void) => invoke<void>("gh_login", { onEvent: setupChannel(onEvent) }),
+    cancelLogin: () => invoke<void>("gh_login_cancel"),
+    logout: () => invoke<void>("gh_logout"),
+    repo: () => invoke<GhRepo | null>("gh_repo"),
+    prs: (filter: PrFilter, query?: string) => invoke<PrSummary[]>("gh_pr_list", { filter, query: query ?? null }),
+    /** Pull requests or issues from any repository gh can see, most recently updated first. */
+    search: (kind: TrackerKind, filters: SearchFilters) => invoke<SearchItem[]>("gh_search", { kind, filters }),
+    repos: () => invoke<GhRepoRef[]>("gh_repos"),
+    labels: (repo: string) => invoke<GhLabel[]>("gh_labels", { repo }),
+    // `repo` (owner/name) names the pull request's repository; without it, the open folder's.
+    pr: (repo: string | undefined, number: number) => invoke<PrDetail>("gh_pr_view", { repo: repo ?? null, number }),
+    prDiff: (repo: string | undefined, number: number) => invoke<string>("gh_pr_diff", { repo: repo ?? null, number }),
+    prForBranch: () => invoke<BranchPr | null>("gh_pr_for_branch"),
+    comment: (repo: string | undefined, number: number, body: string) =>
+      invoke<void>("gh_pr_comment", { repo: repo ?? null, number, body }),
+    review: (repo: string | undefined, number: number, action: ReviewAction, body: string) =>
+      invoke<void>("gh_pr_review", { repo: repo ?? null, number, action, body }),
+    merge: (repo: string | undefined, number: number, method: MergeMethod, deleteBranch: boolean) =>
+      invoke<void>("gh_pr_merge", { repo: repo ?? null, number, method, deleteBranch }),
+    setState: (repo: string | undefined, number: number, change: PrStateChange) =>
+      invoke<void>("gh_pr_set_state", { repo: repo ?? null, number, change }),
+    issue: (repo: string, number: number) => invoke<IssueDetail>("gh_issue_view", { repo, number }),
+    issueComment: (repo: string, number: number, body: string) => invoke<void>("gh_issue_comment", { repo, number, body }),
+    issueSetState: (repo: string, number: number, change: IssueStateChange) =>
+      invoke<void>("gh_issue_set_state", { repo, number, change }),
+    /** Downloads an attachment into the app's cache once (with the gh token on GitHub hosts). */
+    asset: (url: string) => invoke<GhAsset>("gh_asset", { url }),
+    /** Opens a downloaded attachment in its default app. */
+    assetOpen: (path: string) => invoke<void>("gh_asset_open", { path }),
+    /**
+     * Saves a pull request or issue, discussion and attachments included, for chats to reference
+     * as `%id`. `repo` is required for issues; an unchanged one returns the snapshot saved before.
+     */
+    saveItem: (kind: "pr" | "issue", repo: string | undefined, number: number) =>
+      invoke<ItemSummary>("gh_save_item", { kind, repo: repo ?? null, number }),
+    checkout: (number: number) => invoke<void>("gh_pr_checkout", { number }),
+    createPr: (request: { title: string; body: string; base: string; draft: boolean }) =>
+      invoke<{ number: number | null; url: string }>("gh_pr_create", { request }),
+  },
+  /** Opens a web link in the default browser. */
+  openUrl: (url: string) => invoke<void>("open_url", { url }),
   code: {
     /**
      * Semantic tokens for `text`, the contents of `path` as shown, from the file's language
@@ -67,6 +150,9 @@ export const ipc = {
     /** Resolves with the session once the user message is saved; the reply streams to `onEvent`. */
     send: (sessionId: string, text: string, images: NewImage[], onEvent: (event: AgentEvent) => void) =>
       invoke<Session>("chat_send", { sessionId, text, images, onEvent: channel(onEvent) }),
+    /** Sends `text` to subagent `agent` from its tab, by way of the chat's agent; the reply streams to `onEvent`. */
+    sendAgent: (sessionId: string, agent: string, text: string, onEvent: (event: AgentEvent) => void) =>
+      invoke<Session>("chat_send_agent", { sessionId, agent, text, onEvent: channel(onEvent) }),
     /** An attached image as a `data:` URL. */
     image: (sessionId: string, image: ImageAttachment) => invoke<string>("chat_image", { sessionId, image }),
     /**
@@ -83,6 +169,28 @@ export const ipc = {
     /** `answers` maps question text to the chosen answer; `null` skips the question. */
     answer: (sessionId: string, requestId: string, answers: Record<string, string> | null) =>
       invoke<void>("chat_answer", { sessionId, requestId, answers }),
+  },
+  contexts: {
+    /**
+     * Saves the chat, its agent's whole transcript and terminals included, for other chats to
+     * reference as `#id`. An unchanged chat returns the context saved before.
+     */
+    save: (sessionId: string) => invoke<ContextSummary>("contexts_save", { sessionId }),
+    /** Newest first; `query` matches ids and titles. */
+    list: (query?: string) => invoke<ContextSummary[]>("contexts_list", { query: query ?? null }),
+    get: (id: string) => invoke<ContextSummary>("contexts_get", { id }),
+    rename: (id: string, title: string) => invoke<ContextSummary>("contexts_rename", { id, title }),
+    remove: (id: string) => invoke<void>("contexts_delete", { id }),
+    /** The whole context as one Markdown document. */
+    export: (id: string) => invoke<string>("contexts_export", { id }),
+  },
+  /** Saved pull requests and issues (`ipc.github.saveItem`), referenced as `%id`. */
+  items: {
+    /** Newest first; `query` matches ids, titles and `owner/name#number`. */
+    list: (query?: string) => invoke<ItemSummary[]>("items_list", { query: query ?? null }),
+    remove: (id: string) => invoke<void>("items_delete", { id }),
+    /** Markdown, its attachments listed with where they are on disk. */
+    export: (id: string) => invoke<string>("items_export", { id }),
   },
   permissions: {
     /** Rules always allowed in the folder at `root`, e.g. `Bash(pnpm test:*)`. */
@@ -145,6 +253,14 @@ export const ipc = {
   /** Runs the native Copy, Cut or Paste, as if chosen from the Edit menu (macOS only). */
   editAction: (action: "copy" | "cut" | "paste") => invoke<void>("edit_action", { action }),
   dialog: {
+    pickImage: async () => {
+      const picked = await open({
+        multiple: false,
+        title: "Choose a logo",
+        filters: [{ name: "Images", extensions: ["svg", "png", "ico", "jpg", "jpeg", "webp", "gif"] }],
+      })
+      return typeof picked === "string" ? picked : null
+    },
     pickFolder: async () => {
       const picked = await open({ directory: true, multiple: false, title: "Open folder" })
       return typeof picked === "string" ? picked : null
@@ -174,7 +290,14 @@ function channel(onEvent: (event: AgentEvent) => void): Channel<AgentEvent> {
   return channel
 }
 
-/** Tauri rejects with the Rust error's message string. */
+function setupChannel(onEvent: (event: SetupEvent) => void): Channel<SetupEvent> {
+  const channel = new Channel<SetupEvent>()
+  channel.onmessage = onEvent
+  return channel
+}
+
+/** Tauri rejects with the Rust error's message string; `gh` errors lose their `gh:<kind>: ` tag. */
 export function errorMessage(error: unknown): string {
-  return typeof error === "string" ? error : error instanceof Error ? error.message : "Something went wrong"
+  if (typeof error === "string") return error.replace(/^gh:[a-z-]+: /, "")
+  return error instanceof Error ? error.message : "Something went wrong"
 }

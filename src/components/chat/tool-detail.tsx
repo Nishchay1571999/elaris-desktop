@@ -5,6 +5,9 @@ import { diffLines } from "@/lib/diff"
 import { highlightDiff, languageOf } from "@/lib/syntax"
 import { cn } from "@/lib/utils"
 
+import { PLAN_TOOL } from "./activity"
+import { Markdown } from "./markdown"
+
 interface ToolDetailProps {
   name: string
   /** The tool's input, long strings already clipped by the sidecar. */
@@ -54,6 +57,12 @@ export function ToolDetail({ name, input, output, failed }: ToolDetailProps) {
           <Block label={str("description") ?? "Command"} text={`$ ${str("command") ?? ""}`} />
           <Output text={output} />
         </>
+      )
+    case PLAN_TOOL:
+      return (
+        <div className="selectable rounded-md bg-surface-sunken px-3 py-2">
+          <Markdown text={str("plan") ?? ""} />
+        </div>
       )
     case "Read":
     case "Grep":

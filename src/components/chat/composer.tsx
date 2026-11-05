@@ -1,30 +1,30 @@
 import {
+  Archive,
   ArrowUp,
-  Bot,
-  ChevronDown,
-  ClipboardList,
   Cpu,
-  Folder,
   GitBranch,
-  ImagePlus,
   GitPullRequest,
-  Infinity as InfinityIcon,
-  MessageCircleQuestion,
+  ImagePlus,
   MessageSquare,
   Mic,
   Shield,
   ShieldAlert,
   ShieldCheck,
-  Sparkles,
   Square,
   SquareCheck,
   X,
 } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 
 import type { AgentMode } from "@/bindings/AgentMode";
+import type { Branches } from "@/bindings/Branches";
 import type { PermissionPolicy } from "@/bindings/PermissionPolicy";
-import { PlannedTag } from "@/components/ui/button";
 import {
   Menu,
   MenuCheckItem,
@@ -34,13 +34,19 @@ import {
   MenuSeparator,
   MenuTrigger,
 } from "@/components/ui/menu";
+import { CheckIcon, PrStateIcon } from "@/components/pulls/pr-bits";
+import { useCreatePr } from "@/components/pulls/create-pr-dialog";
 import { Tooltip } from "@/components/ui/tooltip";
-import { WorkspaceMenu } from "@/components/workspace/workspace-menu";
+import { checksSummary } from "@/lib/github";
 import { type DraftImage, imageFiles, readImage } from "@/lib/images";
 import { errorMessage, ipc } from "@/lib/ipc";
-import { MODELS, modelShortLabel, PERMISSIONS } from "@/lib/models";
-import { cn } from "@/lib/utils";
+import { MODELS, MODES, modelShortLabel, PERMISSIONS } from "@/lib/models";
+import { cn, isMac, relativeTime } from "@/lib/utils";
+import { usePreferences } from "@/stores/preferences";
+import { useStash } from "@/stores/stash";
+import { useGitHub } from "@/stores/github";
 import {
+  type OutgoingMessage,
   type PendingRequest,
   useSessions,
   useSettings,
@@ -48,34 +54,42 @@ import {
 import { useUi } from "@/stores/ui";
 import { useWorkspace } from "@/stores/workspace";
 
+import { useContextReferences } from "./context-picker";
+import { PendingMessages } from "./pending-messages";
 import { RequestDock, type RequestDockHandle } from "./request-dock";
 
 const NO_REQUESTS: PendingRequest[] = [];
 
-const MODES: Record<
-  AgentMode,
-  { label: string; icon: typeof Bot; hint: string }
-> = {
-  agent: {
-    label: "Agent",
-    icon: InfinityIcon,
-    hint: "Works through the task on its own",
-  },
-  ask: {
-    label: "Ask",
-    icon: MessageCircleQuestion,
-    hint: "Answers without changing files",
-  },
-  plan: {
-    label: "Plan",
-    icon: ClipboardList,
-    hint: "Proposes a plan for you to approve",
-  },
-};
+// Where the hero box sat when its first message went out. The docked box that
+// replaces it reads this once and glides down from there.
+let heroBox: DOMRect | null = null;
+
+// Unsent text and images per chat ("new" for a chat not started yet), so a
+// draft survives switching pages and chats. The text is also kept in
+// localStorage so it survives quitting; images only last until then.
+const drafts = new Map<string, { text: string; images: DraftImage[] }>();
+
+const SAVED_DRAFTS = "elaris.drafts";
+
+function savedDrafts(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(SAVED_DRAFTS) ?? "{}");
+  } catch {
+    return {};
+  }
+}
+
+function saveDraftText(key: string, text: string) {
+  const all = savedDrafts();
+  if (text.trim()) all[key] = text;
+  else delete all[key];
+  localStorage.setItem(SAVED_DRAFTS, JSON.stringify(all));
+}
+
 
 /**
- * The prompt box. `hero` adds the context chips shown on the new-chat screen;
- * `docked` sits under a transcript, with the agent's open question or
+ * The prompt box. `hero` is the new-chat screen's box; `docked` sits under a
+ * transcript, with the agent's open question or
  * permission prompt docked on top of it.
  */
 export function Composer({
@@ -91,12 +105,21 @@ export function Composer({
   );
   const { mode, model } = useSettings(sessionId);
   const focusSignal = useUi((s) => s.composerFocus);
-  const [text, setText] = useState("");
-  const [images, setImages] = useState<DraftImage[]>([]);
+  const sendKey = usePreferences((s) => s.sendKey);
+  const draftKey = sessionId ?? "new";
+  const [text, setText] = useState(
+    () => drafts.get(draftKey)?.text ?? savedDrafts()[draftKey] ?? "",
+  );
+  const [images, setImages] = useState<DraftImage[]>(
+    () => drafts.get(draftKey)?.images ?? [],
+  );
   const [dragging, setDragging] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
   const dock = useRef<RequestDockHandle>(null);
+  const root = useRef<HTMLDivElement>(null);
+  const box = useRef<HTMLDivElement>(null);
+  const contexts = useContextReferences(text, setText, input);
   const requests = useSessions((s) =>
     sessionId ? (s.requests[sessionId] ?? NO_REQUESTS) : NO_REQUESTS,
   );
@@ -107,6 +130,33 @@ export function Composer({
   useEffect(() => {
     input.current?.focus();
   }, [focusSignal, sessionId]);
+
+  // Before paint, so the docked box never flashes at the bottom first.
+  useLayoutEffect(() => {
+    if (variant !== "docked") return;
+    const from = heroBox;
+    heroBox = null;
+    if (!from || !box.current) return;
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const to = box.current.getBoundingClientRect();
+    // Glides down from the new-chat screen to the bottom of the conversation.
+    root.current?.animate(
+      [
+        {
+          transform: `translate(${from.left - to.left}px, ${from.top - to.top}px)`,
+          width: `${from.width}px`,
+        },
+        { transform: "none", width: `${to.width}px` },
+      ],
+      { duration: 420, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
+    );
+  }, [variant]);
+
+  useEffect(() => {
+    if (text === "" && images.length === 0) drafts.delete(draftKey);
+    else drafts.set(draftKey, { text, images });
+    saveDraftText(draftKey, text);
+  }, [draftKey, text, images]);
 
   // Grow with content up to a cap, then scroll.
   useEffect(() => {
@@ -132,7 +182,7 @@ export function Composer({
   const hasDraft = text.trim() !== "" || images.length > 0;
   // With a draft, sending mid-reply stops the reply and sends straight away;
   // with none, the button stops the reply.
-  const canSend = answering ? text.trim() !== "" : hasDraft;
+  const canSend = answering ? text.trim() !== "" : hasDraft && !contexts.blocked;
   const showStop = streaming && !canSend;
 
   const submit = async () => {
@@ -143,9 +193,15 @@ export function Composer({
     }
     if (!canSend) return;
     const [sentText, sentImages] = [text, images];
+    if (variant === "hero")
+      heroBox = box.current?.getBoundingClientRect() ?? null;
+    // Cleared now: the box may unmount before its effect would clear it.
+    drafts.delete(draftKey);
+    saveDraftText(draftKey, "");
     setText("");
     setImages([]);
-    const ok = await send(
+    // Until it's in the chat, the message shows over the box (`PendingMessages`).
+    const result = await send(
       sessionId,
       sentText.trim(),
       sentImages.map(({ mediaType, name, data }) => ({
@@ -154,11 +210,30 @@ export function Composer({
         data,
       })),
     );
-    // Give the draft back rather than lose it.
-    if (!ok) {
+    if (result !== "sent") heroBox = null;
+    // No chat to hold it: give the draft back rather than lose it.
+    if (result === "no-chat") {
+      drafts.set(draftKey, { text: sentText, images: sentImages });
+      saveDraftText(draftKey, sentText);
       setText(sentText);
       setImages(sentImages);
     }
+  };
+
+  /** Puts a message that hasn't gone yet back in the box, ahead of any new draft. */
+  const editPending = (message: OutgoingMessage) => {
+    setText((current) =>
+      current.trim() ? `${message.text}\n\n${current}` : message.text,
+    );
+    setImages((current) => [
+      ...message.images.map((image) => ({
+        ...image,
+        key: crypto.randomUUID(),
+        url: `data:${image.mediaType};base64,${image.data}`,
+      })),
+      ...current,
+    ]);
+    input.current?.focus();
   };
 
   // Only file drags count; dragging text within the box stays native.
@@ -168,10 +243,11 @@ export function Composer({
   const ModeIcon = MODES[mode].icon;
 
   return (
-    <div className="w-full">
-      {variant === "hero" && <ContextChips />}
-
-      <div className="rounded-xl shadow-composer">
+    <div ref={root} className="w-full">
+      {sessionId && (
+        <PendingMessages sessionId={sessionId} onEdit={editPending} />
+      )}
+      <div ref={box} className="rounded-2xl shadow-composer">
         {request && sessionId && (
           <RequestDock
             ref={dock}
@@ -198,11 +274,13 @@ export function Composer({
             void addImages(imageFiles(e.dataTransfer));
           }}
           className={cn(
-            "rounded-xl border border-input bg-surface-elevated transition-colors focus-within:border-brand/60",
+            "relative rounded-2xl border border-input bg-surface-elevated transition-colors focus-within:border-brand/60",
             request && "rounded-t-none",
             dragging && "border-brand bg-brand-soft",
           )}
         >
+          {!answering && contexts.menu}
+          {contexts.chips}
           {images.length > 0 && (
             <ul
               aria-label="Attached images"
@@ -236,7 +314,11 @@ export function Composer({
             ref={input}
             value={text}
             rows={variant === "hero" ? 2 : 1}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              setText(e.target.value);
+              contexts.track(e.target);
+            }}
+            onSelect={(e) => contexts.track(e.currentTarget)}
             onPaste={(e) => {
               const files = imageFiles(e.clipboardData);
               if (files.length === 0) return;
@@ -244,10 +326,13 @@ export function Composer({
               void addImages(files);
             }}
             onKeyDown={(e) => {
+              if (!answering && contexts.onKeyDown(e)) return;
+              const mod = isMac ? e.metaKey : e.ctrlKey;
               if (
                 e.key === "Enter" &&
                 !e.shiftKey &&
-                !e.nativeEvent.isComposing
+                !e.nativeEvent.isComposing &&
+                (sendKey === "enter" || mod)
               ) {
                 e.preventDefault();
                 void submit();
@@ -255,10 +340,10 @@ export function Composer({
             }}
             placeholder={
               variant === "hero"
-                ? "Pitch your idea"
+                ? "Ask anything..."
                 : answering
                   ? "Type a different answer…"
-                  : "Reply…"
+                  : "Reply, or type # for a saved chat, % for a saved PR or issue…"
             }
             aria-label="Message"
             className="block w-full resize-none bg-transparent px-3.5 pt-3 pb-1 text-sm leading-relaxed outline-none placeholder:text-subtle-foreground"
@@ -274,6 +359,14 @@ export function Composer({
                 <ImagePlus className="size-4" />
               </button>
             </Tooltip>
+            <StashMenu
+              text={text}
+              onStash={() => setText("")}
+              onRestore={(restored) => {
+                setText(restored);
+                input.current?.focus();
+              }}
+            />
             <input
               ref={picker}
               type="file"
@@ -382,46 +475,6 @@ export function Composer({
   );
 }
 
-function ContextChips() {
-  const info = useWorkspace((s) => s.info);
-
-  return (
-    <div className="mb-3 flex items-center gap-2">
-      <Menu>
-        <MenuTrigger asChild>
-          <OutlineChip>
-            <Sparkles className="size-3.5" /> Elaris{" "}
-            <ChevronDown className="size-3" />
-          </OutlineChip>
-        </MenuTrigger>
-        <MenuContent>
-          <MenuLabel>Agent</MenuLabel>
-          <MenuCheckItem checked>Elaris</MenuCheckItem>
-          <MenuItem disabled>
-            <span className="size-3.5" />
-            <span className="flex-1">Other agents</span>
-            <PlannedTag />
-          </MenuItem>
-        </MenuContent>
-      </Menu>
-
-      <WorkspaceMenu>
-        <OutlineChip>
-          <Folder className="size-3.5" /> {info?.name ?? "Open folder"}{" "}
-          <ChevronDown className="size-3" />
-        </OutlineChip>
-      </WorkspaceMenu>
-
-      <Tooltip label="Linking an issue or pull request is planned">
-        <OutlineChip aria-disabled className="opacity-50">
-          <GitPullRequest className="size-3.5" /> Issue/PR{" "}
-          <ChevronDown className="size-3" />
-        </OutlineChip>
-      </Tooltip>
-    </div>
-  );
-}
-
 const PERMISSION_ICONS: Record<PermissionPolicy, typeof Shield> = {
   ask: Shield,
   "accept-edits": ShieldCheck,
@@ -523,13 +576,109 @@ function Footer({ sessionId }: { sessionId: string | null }) {
         icon={<SquareCheck className="size-3.5" />}
       />
       {branch && (
-        <Tooltip label="Current branch">
-          <span className="flex h-6 items-center gap-1 px-1.5 text-muted-foreground">
-            <GitBranch className="size-3.5" /> {branch}
-          </span>
-        </Tooltip>
+        <>
+          <PullRequestButton branch={branch} />
+          <BranchMenu branch={branch} />
+        </>
       )}
     </div>
+  );
+}
+
+/** Opens a pull request from the current branch into the default branch. */
+/**
+ * The branch's pull request: its number and checks when one is open (opens it),
+ * else a button that opens the new pull request dialog.
+ */
+function PullRequestButton({ branch }: { branch: string }) {
+  const base = useWorkspace((s) => s.info?.defaultBranch) ?? "main";
+  const pr = useGitHub((s) => s.branchPr);
+  const navigate = useUi((s) => s.navigate);
+  const createPr = useCreatePr();
+
+  if (pr) {
+    const checks = checksSummary(pr.statusCheckRollup);
+    return (
+      <Tooltip label={`#${pr.number}: ${pr.title}`}>
+        <ChipButton
+          className="h-6 px-1.5"
+          onClick={() => navigate({ view: { kind: "pulls", number: pr.number } })}
+        >
+          <PrStateIcon state={pr.state} isDraft={pr.isDraft} className="size-3.5" />
+          #{pr.number}
+          {checks.state !== "none" && <CheckIcon state={checks.state} />}
+        </ChipButton>
+      </Tooltip>
+    );
+  }
+
+  return (
+    <Tooltip
+      label={
+        branch === base
+          ? `Branch off ${base} and open a pull request`
+          : `Push ${branch} and open a pull request into ${base}`
+      }
+    >
+      <ChipButton className="h-6 px-1.5" onClick={() => void createPr()}>
+        <GitPullRequest className="size-3.5" />
+        Pull request
+      </ChipButton>
+    </Tooltip>
+  );
+}
+
+/** The current branch; opening it lists branches to switch to. */
+function BranchMenu({ branch }: { branch: string }) {
+  const switchBranch = useWorkspace((s) => s.switchBranch);
+  const [branches, setBranches] = useState<Branches | null>(null);
+
+  const load = async () => {
+    try {
+      setBranches(await ipc.git.branches());
+    } catch (error) {
+      useWorkspace.setState({ error: errorMessage(error) });
+    }
+  };
+
+  return (
+    <Menu onOpenChange={(open) => open && void load()}>
+      <Tooltip label="Switch branch">
+        <MenuTrigger asChild>
+          <ChipButton className="h-6 px-1.5">
+            <GitBranch className="size-3.5" /> {branch}
+          </ChipButton>
+        </MenuTrigger>
+      </Tooltip>
+      <MenuContent align="end" className="max-h-80 overflow-y-auto">
+        <MenuLabel>Branches</MenuLabel>
+        {branches?.local.map((name) => (
+          <MenuCheckItem
+            key={name}
+            checked={name === branch}
+            disabled={name === branch}
+            onSelect={() => void switchBranch(name)}
+          >
+            <span className="min-w-0 flex-1 truncate">{name}</span>
+          </MenuCheckItem>
+        ))}
+        {branches && branches.remote.length > 0 && (
+          <>
+            <MenuSeparator />
+            <MenuLabel>Remote, checks out locally</MenuLabel>
+            {branches.remote.map((name) => (
+              <MenuCheckItem
+                key={name}
+                checked={false}
+                onSelect={() => void switchBranch(name)}
+              >
+                <span className="min-w-0 flex-1 truncate">{name}</span>
+              </MenuCheckItem>
+            ))}
+          </>
+        )}
+      </MenuContent>
+    </Menu>
   );
 }
 
@@ -580,25 +729,85 @@ function PlannedControl({
   );
 }
 
+/**
+ * Puts the prompt aside to send later, or brings one back. Restoring swaps it
+ * with whatever is in the box, so nothing typed is lost.
+ */
+function StashMenu({
+  text,
+  onStash,
+  onRestore,
+}: {
+  text: string;
+  onStash: () => void;
+  onRestore: (text: string) => void;
+}) {
+  const { items, stash, take, clear } = useStash();
+  const hasText = text.trim() !== "";
+
+  return (
+    <Menu>
+      <Tooltip label="Stashed prompts">
+        <MenuTrigger asChild>
+          <button
+            type="button"
+            aria-label="Stashed prompts"
+            className="relative flex size-7 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+          >
+            <Archive className="size-4" />
+            {items.length > 0 && (
+              <span className="absolute top-1 right-1 size-1.5 rounded-full bg-brand" />
+            )}
+          </button>
+        </MenuTrigger>
+      </Tooltip>
+      <MenuContent className="w-72">
+        <MenuItem
+          disabled={!hasText}
+          onSelect={() => {
+            stash(text);
+            onStash();
+          }}
+        >
+          <Archive /> Stash this prompt
+        </MenuItem>
+        {items.length > 0 && (
+          <>
+            <MenuSeparator />
+            <MenuLabel>Stashed</MenuLabel>
+            {items.map((item) => (
+              <MenuItem
+                key={item.id}
+                onSelect={() => {
+                  const restored = take(item.id);
+                  if (!restored) return;
+                  if (hasText) stash(text);
+                  onRestore(restored.text);
+                }}
+              >
+                <span className="min-w-0 flex-1 truncate">{item.text}</span>
+                <span className="shrink-0 text-[11px] text-subtle-foreground">
+                  {relativeTime(item.createdAt)}
+                </span>
+              </MenuItem>
+            ))}
+            <MenuSeparator />
+            <MenuItem onSelect={clear} className="text-muted-foreground">
+              Clear stash
+            </MenuItem>
+          </>
+        )}
+      </MenuContent>
+    </Menu>
+  );
+}
+
 function ChipButton({ className, ...props }: React.ComponentProps<"button">) {
   return (
     <button
       type="button"
       className={cn(
         "flex h-7 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 data-[state=open]:bg-muted",
-        className,
-      )}
-      {...props}
-    />
-  );
-}
-
-function OutlineChip({ className, ...props }: React.ComponentProps<"button">) {
-  return (
-    <button
-      type="button"
-      className={cn(
-        "flex h-7 items-center gap-1.5 rounded-md border border-border-strong px-2.5 text-xs text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 data-[state=open]:bg-muted",
         className,
       )}
       {...props}

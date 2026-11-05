@@ -1,0 +1,15 @@
+[package]
+name = "device-control"
+version = "0.1.0"
+description = "Android emulators and iOS simulators for the agent's device-control tool: UI as text, batched input, app logs and app data"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+quick-xml = "0.42"
+regex = "1"
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

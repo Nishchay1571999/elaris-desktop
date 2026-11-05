@@ -106,3 +106,88 @@ fn branch_is_known_before_the_first_commit() {
     assert!(info.is_git);
     assert!(info.branch.is_some());
 }
+
+#[test]
+fn lists_and_switches_branches() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Repository::init(dir.path()).unwrap();
+    write(dir.path(), "a.txt", "a\n");
+    commit_all(&repo);
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("feature", &head, false).unwrap();
+    repo.remote("origin", "https://example.com/repo.git").unwrap();
+    // A remote-only branch, as a fetch would leave it.
+    repo.reference("refs/remotes/origin/remote-only", head.id(), false, "test").unwrap();
+    repo.reference("refs/remotes/origin/feature", head.id(), false, "test").unwrap();
+
+    let ws = Workspace::open(dir.path()).unwrap();
+    let start = ws.info().branch.unwrap();
+    let branches = ws.branches().unwrap();
+    assert!(branches.local.contains(&"feature".to_owned()));
+    assert!(branches.local.contains(&start));
+    // origin/feature has a local twin, so only the remote-only one is offered.
+    assert_eq!(branches.remote, ["origin/remote-only"]);
+    assert_eq!(ws.info().default_branch.as_deref(), Some(start.as_str()));
+
+    ws.switch_branch("feature").unwrap();
+    assert_eq!(ws.info().branch.as_deref(), Some("feature"));
+
+    ws.switch_branch("origin/remote-only").unwrap();
+    assert_eq!(ws.info().branch.as_deref(), Some("remote-only"));
+    assert!(ws.branches().unwrap().remote.is_empty());
+
+    assert!(ws.switch_branch("--force").is_err());
+    assert!(ws.switch_branch("nope").is_err());
+}
+
+/// A repo whose `feature` branch changed `a.txt`, checked out on the start branch.
+fn repo_with_diverged_feature(dir: &Path) -> Repository {
+    let repo = Repository::init(dir).unwrap();
+    let mut config = repo.config().unwrap();
+    config.set_str("user.name", "Test").unwrap();
+    config.set_str("user.email", "test@example.com").unwrap();
+    write(dir, "a.txt", "one\ntwo\nthree\n");
+    write(dir, "b.txt", "b\n");
+    commit_all(&repo);
+    let start = repo.head().unwrap().shorthand().unwrap().to_owned();
+    {
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature", &head, false).unwrap();
+    }
+    repo.set_head("refs/heads/feature").unwrap();
+    write(dir, "a.txt", "ONE\ntwo\nthree\n");
+    commit_all(&repo);
+    repo.set_head(&format!("refs/heads/{start}")).unwrap();
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
+    repo
+}
+
+#[test]
+fn switching_carries_uncommitted_changes_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_diverged_feature(dir.path());
+    // Touches a.txt, which differs on feature, so a plain switch would refuse.
+    write(dir.path(), "a.txt", "one\ntwo\nTHREE\n");
+    write(dir.path(), "new.txt", "fresh\n");
+
+    let ws = Workspace::open(dir.path()).unwrap();
+    ws.switch_branch("feature").unwrap();
+    assert_eq!(ws.info().branch.as_deref(), Some("feature"));
+    assert_eq!(fs::read_to_string(dir.path().join("a.txt")).unwrap(), "ONE\ntwo\nTHREE\n");
+    assert_eq!(fs::read_to_string(dir.path().join("new.txt")).unwrap(), "fresh\n");
+    assert!(repo.find_reference("refs/stash").is_err(), "stash should be popped");
+}
+
+#[test]
+fn switching_keeps_clashing_changes_in_conflicts_and_the_stash() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_diverged_feature(dir.path());
+    write(dir.path(), "a.txt", "uno\ntwo\nthree\n");
+
+    let ws = Workspace::open(dir.path()).unwrap();
+    let error = ws.switch_branch("feature").unwrap_err().to_string();
+    assert!(error.contains("clash"), "{error}");
+    assert_eq!(ws.info().branch.as_deref(), Some("feature"));
+    assert!(fs::read_to_string(dir.path().join("a.txt")).unwrap().contains("<<<<<<<"));
+    assert!(repo.find_reference("refs/stash").is_ok());
+}

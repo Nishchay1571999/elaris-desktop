@@ -16,4 +16,9 @@ agentSessionId: string | null,
 /**
  * Tokens used by every reply so far. Chats from before this was kept start at zero.
  */
-usage: TokenUsage, messages: Array<Message>, };
+usage: TokenUsage, 
+/**
+ * Prompt tokens of the main agent's latest model call, so how full its
+ * context window is. Zero until a reply reports it.
+ */
+context: number, messages: Array<Message>, };

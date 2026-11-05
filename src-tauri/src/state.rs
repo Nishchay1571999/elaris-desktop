@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use agent_core::{CancellationToken, ClaudeAgent};
 use agent_protocol::{AgentEvent, LiveReply, Message};
 use code_intelligence::CodeIntelligence;
+use contexts::ContextStore;
 use terminal::Terminals;
 use tauri::ipc::Channel;
 use workspace::{Watcher, Workspace};
@@ -15,6 +16,8 @@ use crate::store::Store;
 pub struct AppState {
     pub store: Store,
     pub claude: ClaudeAgent,
+    /// Chats saved for other chats to reference with `#ctx-…`.
+    pub contexts: ContextStore,
     /// Language servers for the code views.
     pub code: CodeIntelligence,
     /// Shells behind the terminal tabs.
@@ -42,8 +45,8 @@ struct OpenWorkspace {
 }
 
 impl AppState {
-    pub fn new(store: Store, claude: ClaudeAgent, code: CodeIntelligence) -> Self {
-        Self { store, claude, code, terminals: Terminals::new(), agent_reads: ReadPositions::default(), open: Mutex::new(None), runs: Mutex::new(HashMap::new()) }
+    pub fn new(store: Store, claude: ClaudeAgent, contexts: ContextStore, code: CodeIntelligence) -> Self {
+        Self { store, claude, contexts, code, terminals: Terminals::new(), agent_reads: ReadPositions::default(), open: Mutex::new(None), runs: Mutex::new(HashMap::new()) }
     }
 
     /// Replaces the open workspace; the previous watcher and language servers stop.

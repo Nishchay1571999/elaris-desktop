@@ -1,0 +1,19 @@
+[package]
+name = "contexts"
+version = "0.1.0"
+description = "Saved contexts: whole agent sessions kept in SQLite for other chats to reference"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+agent-protocol.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ts-rs.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

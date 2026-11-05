@@ -7,7 +7,15 @@ import { delimiter, dirname } from "node:path"
 import { createInterface } from "node:readline"
 
 import { type Command, log, send } from "./protocol.js"
-import { answerPermission, answerQuestion, answerTerminal, interrupt, interruptAll, start } from "./run.js"
+import {
+  answerHost,
+  answerPermission,
+  answerQuestion,
+  interrupt,
+  interruptAll,
+  start,
+  updateSettings,
+} from "./run.js"
 import { sessionUsage } from "./usage.js"
 
 // MCP servers started with `npx …` need node on PATH, which an app opened
@@ -32,6 +40,9 @@ lines.on("line", (line) => {
     case "interrupt":
       interrupt(command.runId)
       break
+    case "settings":
+      updateSettings(command)
+      break
     case "permission":
       answerPermission(command.runId, command.requestId, command.decision)
       break
@@ -39,7 +50,12 @@ lines.on("line", (line) => {
       answerQuestion(command.runId, command.requestId, command.answers)
       break
     case "terminalResult":
-      answerTerminal(command.runId, command.requestId, { ok: command.ok, text: command.text })
+    case "contextsResult":
+      answerHost(command.runId, command.requestId, { ok: command.ok, text: command.text })
+      break
+    case "desktopResult":
+    case "deviceResult":
+      answerHost(command.runId, command.requestId, { ok: command.ok, text: command.text, image: command.image })
       break
     case "usage": {
       const { runId, agentSessionId } = command

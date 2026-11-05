@@ -198,6 +198,13 @@ export function disposeAllTerminals() {
   for (const key of [...entries.keys()]) disposeTerminal(key)
 }
 
+/** Re-reads the colours into every terminal, after the theme or accent changes. */
+export function refreshTerminalThemes() {
+  if (entries.size === 0) return
+  const colours = theme()
+  for (const { term } of entries.values()) term.options.theme = colours
+}
+
 function theme() {
   const rgb = (name: string) => `rgb(${channels(name).join(", ")})`
   return {
